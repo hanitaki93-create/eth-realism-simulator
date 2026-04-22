@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import ScenarioForm from './components/ScenarioForm.jsx';
 import { DEFAULT_CONFIG, simulateScenario } from './simulatorCore.js';
 
-const fmt = (n, d=2) => n == null ? '—' : Number(n).toFixed(d);
+const fmt = (n, d=2) => n == null || Number.isNaN(Number(n)) ? '—' : Number(n).toFixed(d);
 
 export default function App() {
   const [config, setConfig] = useState(DEFAULT_CONFIG);
@@ -13,6 +13,7 @@ export default function App() {
 
   async function runScenario() {
     setLoading(true);
+    setResult(null);
     setStatus('Fetching candles…');
     try {
       const resp = await fetch(`/api/klines?symbol=${config.symbol}&interval=${config.interval}&limit=110000`);
@@ -22,7 +23,7 @@ export default function App() {
       setStatus(`Fetched ${json.candles.length.toLocaleString()} candles. Running simulation…`);
       const sim = simulateScenario(json.candles, config);
       setResult(sim);
-      setStatus('Simulation complete.');
+      setStatus(`Simulation complete. ${sim.summary.trades} closed trades from ${json.candles.length.toLocaleString()} candles.`);
     } catch (e) {
       setStatus(`Error: ${e.message}`);
     } finally {
@@ -30,7 +31,7 @@ export default function App() {
     }
   }
 
-  const topRows = useMemo(() => (result?.results || []).slice(-50).reverse(), [result]);
+  const topRows = useMemo(() => (result?.results || []).filter(Boolean).slice(-50).reverse(), [result]);
 
   return (
     <div style={{ maxWidth: 1400, margin:'0 auto', padding:20 }}>
@@ -38,6 +39,7 @@ export default function App() {
       <div style={{ color:'var(--text3)', marginBottom: 16 }}>MVP built on top of the V5 baseline engine code.</div>
       <ScenarioForm config={config} setConfig={setConfig} onRun={runScenario} loading={loading} />
       <div className="card" style={{ marginBottom:16 }}>{status}</div>
+      {!!candles.length && <div className="card" style={{ marginBottom:16 }}>Loaded candles: {candles.length.toLocaleString()}</div>}
       {result && (
         <>
           <div style={{ display:'grid', gridTemplateColumns:'repeat(8, minmax(0,1fr))', gap:10, marginBottom:16 }}>
@@ -72,7 +74,7 @@ export default function App() {
           <div className="card">
             <h3>Recent trade rows</h3>
             <table className="sim-table"><thead><tr><th>Engine</th><th>Status</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL R</th><th>Slip</th><th>Entry Maker</th></tr></thead><tbody>
-              {topRows.map((r, idx) => <tr key={idx}><td>{r.engine}</td><td>{r.status}</td><td>{r.side || '—'}</td><td>{fmt(r.entry,2)}</td><td>{fmt(r.exitPrice,2)}</td><td>{fmt(r.pnlR,2)}</td><td>{fmt(r.slippagePts,2)}</td><td>{String(r.entryMaker)}</td></tr>)}
+              {topRows.map((r, idx) => <tr key={idx}><td>{r.engine}</td><td>{r.status}</td><td>{r.side || '—'}</td><td>{fmt(r.entry,2)}</td><td>{fmt(r.exitPrice,2)}</td><td>{fmt(r.pnlR,2)}</td><td>{fmt(r.slippagePts,2)}</td><td>{r.entryMaker == null ? '—' : String(r.entryMaker)}</td></tr>)}
             </tbody></table>
           </div>
         </>
