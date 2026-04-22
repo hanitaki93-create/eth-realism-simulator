@@ -181,6 +181,7 @@ export function simulateScenario(candles, config) {
           entry: actualEntry,
           entryIdx: i + 1,
           entryFeeUsd: entryFee(intendedNotional, isEntryMaker, cfg),
+          entryMaker: openTrade.entryMaker,
           engineId,
         };
         engineStats[engineId].filled += 1;
@@ -239,7 +240,7 @@ export function simulateScenario(candles, config) {
           tp: openTrade.tp,
           exitPrice,
           qty: openTrade.qty,
-          entryMaker: isEntryMaker,
+          entryMaker: openTrade.entryMaker,
           tpMode: cfg.tpMode,
           pnlUsd,
           pnlR,
@@ -268,7 +269,7 @@ export function simulateScenario(candles, config) {
         const row = {
           engine: openTrade.engineId, status: 'TIMEOUT', signalTime: openTrade.signalTime, entryTime: candles[openTrade.entryIdx].openTime,
           exitTime: c.closeTime, side: openTrade.side, entry: openTrade.entry, sl: openTrade.sl, tp: openTrade.tp, exitPrice, qty: openTrade.qty,
-          entryMaker: cfg.entryMode === 'maker_gtx', tpMode: cfg.tpMode, pnlUsd, pnlR, entryFeeUsd: openTrade.entryFeeUsd, exitFeeUsd: exitFee(notionalExit, false, cfg), slippagePts: 0,
+          entryMaker: openTrade.entryMaker, tpMode: cfg.tpMode, pnlUsd, pnlR, entryFeeUsd: openTrade.entryFeeUsd, exitFeeUsd: exitFee(notionalExit, false, cfg), slippagePts: 0,
         };
         results.push(row);
         applyCompounding(balanceState, row, cfg, c.closeTime);
