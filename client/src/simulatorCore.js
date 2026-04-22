@@ -43,12 +43,12 @@ function deepClone(obj) { return JSON.parse(JSON.stringify(obj)); }
 function quarterKey(ts) { const d = new Date(ts); return `${d.getUTCFullYear()}-Q${Math.floor(d.getUTCMonth()/3)+1}`; }
 function monthKey(ts) { const d = new Date(ts); return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}`; }
 function sideSign(side) { return side === 'LONG' ? 1 : -1; }
-function clamp(n, min, max) { return Math.max(min, Math.min(max, n)); }
 function avg(arr){ return arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : 0; }
+function isFiniteNumber(n) { return Number.isFinite(Number(n)); }
 
-function getRiskDollar(balance, cfg, cadenceState) {
+function getRiskDollar(balance, cfg) {
   const raw = cfg.riskMode === 'pct' ? balance * (cfg.riskPct / 100) : cfg.fixedRisk;
-  return Math.min(raw, cfg.riskCap || raw);
+  return Math.max(0, Math.min(raw, cfg.riskCap || raw));
 }
 
 function applyCompounding(balanceState, trade, cfg, ts) {
@@ -88,11 +88,16 @@ function buildSignal(diag, engineId, candle, cfg) {
   const side = s.signal;
   const rawEntry = Number(s.entry_price);
   const rawSl = Number(s.stop_loss);
+  if (!['LONG', 'SHORT'].includes(side) || !isFiniteNumber(rawEntry) || !isFiniteNumber(rawSl)) return null;
+
   const slDist = Math.abs(rawEntry - rawSl) * (cfg.slMultiplier || 1);
   const effectiveSlDist = Math.max(slDist, cfg.minSlFloor || 0.0001);
+  if (!isFiniteNumber(effectiveSlDist) || effectiveSlDist <= 0) return null;
+
   const entry = rawEntry + (side === 'LONG' ? cfg.entryOffset : -cfg.entryOffset);
   const sl = side === 'LONG' ? entry - effectiveSlDist : entry + effectiveSlDist;
   const tp = side === 'LONG' ? entry + effectiveSlDist * cfg.tpRMultiple : entry - effectiveSlDist * cfg.tpRMultiple;
+
   return {
     engine: engineId,
     side,
@@ -108,21 +113,60 @@ function buildSignal(diag, engineId, candle, cfg) {
 }
 
 function makerWouldReject(signal, nextCandle) {
+  if (!nextCandle) return true;
   if (signal.side === 'LONG') return nextCandle.open > signal.entry;
   return nextCandle.open < signal.entry;
 }
 
 function makerTouched(signal, candle) {
-  return candle.low <= signal.entry && candle.high >= signal.entry;
+  return candle && candle.low <= signal.entry && candle.high >= signal.entry;
 }
 
 function entryFee(notional, isMaker, cfg) { return notional * ((isMaker ? cfg.feeMakerBps : cfg.feeTakerBps) / 10000); }
-
 function exitFee(notional, isMaker, cfg) { return notional * ((isMaker ? cfg.feeMakerBps : cfg.feeTakerBps) / 10000); }
+
+function buildClosedTradeRow(trade, candle, exitType, exitPrice, isExitMaker, cfg) {
+  const grossPnl = trade.side === 'LONG'
+    ? (exitPrice - trade.entry) * trade.qty
+    : (trade.entry - exitPrice) * trade.qty;
+  const notionalExit = Math.abs(exitPrice * trade.qty);
+  const exitFeeUsd = exitFee(notionalExit, isExitMaker, cfg);
+  const fees = trade.entryFeeUsd + exitFeeUsd;
+  const pnlUsd = grossPnl - fees;
+  const pnlR = trade.riskUsd ? pnlUsd / trade.riskUsd : 0;
+
+  return {
+    engine: trade.engineId,
+    status: exitType,
+    signalTime: trade.signalTime,
+    entryTime: trade.entryTime,
+    exitTime: candle.closeTime,
+    side: trade.side,
+    entry: trade.entry,
+    sl: trade.sl,
+    tp: trade.tp,
+    exitPrice,
+    qty: trade.qty,
+    entryMaker: !!trade.entryMaker,
+    tpMode: cfg.tpMode,
+    pnlUsd,
+    pnlR,
+    entryFeeUsd: trade.entryFeeUsd,
+    exitFeeUsd,
+    slippagePts: exitType === 'SL' ? Math.abs(exitPrice - trade.sl) : exitType === 'TP' ? Math.abs(exitPrice - trade.tp) : 0,
+  };
+}
 
 export function simulateScenario(candles, config) {
   const cfg = deepClone({ ...DEFAULT_CONFIG, ...config, engines: { ...DEFAULT_CONFIG.engines, ...(config.engines || {}) } });
   const enabledEngineIds = Object.entries(cfg.engines).filter(([,v]) => v).map(([k]) => k);
+  if (!enabledEngineIds.length) {
+    throw new Error('Enable at least one engine before running the simulator.');
+  }
+  if (!Array.isArray(candles) || candles.length < 120) {
+    throw new Error('Not enough candles loaded to run the simulator.');
+  }
+
   const results = [];
   const engineStats = Object.fromEntries(enabledEngineIds.map(id => [id, { signals: 0, filled: 0, gtxRejected: 0, timeoutMissed: 0, wins: 0, losses: 0, timeouts: 0, netR: 0 }]));
   const balanceState = { balance: 10000, pendingPnl: 0, pendingBucket: null };
@@ -142,37 +186,37 @@ export function simulateScenario(candles, config) {
         signal.signalIdx = i;
         engineStats[engineId].signals += 1;
 
-        const riskUsd = getRiskDollar(balanceState.balance, cfg, balanceState);
+        const riskUsd = getRiskDollar(balanceState.balance, cfg);
+        if (!riskUsd || !isFiniteNumber(signal.slDistance) || signal.slDistance <= 0) continue;
         const qty = riskUsd / signal.slDistance;
-        const intendedNotional = qty * signal.entry;
+        const intendedNotional = Math.abs(qty * signal.entry);
 
         let filled = false;
         let actualEntry = signal.entry;
         let isEntryMaker = cfg.entryMode === 'maker_gtx';
-        let entryStatus = 'open';
 
         if (cfg.entryMode === 'maker_gtx') {
           if (Math.random() < cfg.makerEntryRejectRate || makerWouldReject(signal, next1)) {
             engineStats[engineId].gtxRejected += 1;
-            results.push({ engine: engineId, signalTime: signal.signalTime, status: 'GTX_REJECT', entry: signal.entry, sl: signal.sl, tp: signal.tp, intendedRisk: riskUsd });
+            results.push({ engine: engineId, signalTime: signal.signalTime, status: 'GTX_REJECT', entry: signal.entry, sl: signal.sl, tp: signal.tp, intendedRisk: riskUsd, entryMaker: true });
             continue;
           }
-          const touchWindow = [next1, next2].slice(0, cfg.entryTimeoutCandles);
+          const touchWindow = [next1, next2].slice(0, Math.max(1, cfg.entryTimeoutCandles));
           const touched = touchWindow.find(c => makerTouched(signal, c));
           if (!touched || Math.random() < cfg.makerEntryMissAfterTouchRate) {
             engineStats[engineId].timeoutMissed += 1;
-            results.push({ engine: engineId, signalTime: signal.signalTime, status: 'ENTRY_TIMEOUT', entry: signal.entry, sl: signal.sl, tp: signal.tp, intendedRisk: riskUsd });
+            results.push({ engine: engineId, signalTime: signal.signalTime, status: 'ENTRY_TIMEOUT', entry: signal.entry, sl: signal.sl, tp: signal.tp, intendedRisk: riskUsd, entryMaker: true });
             continue;
           }
           filled = true;
           actualEntry = signal.entry;
         } else {
           filled = true;
-          actualEntry = next1.open;
+          actualEntry = next1?.open ?? signal.entry;
           isEntryMaker = false;
         }
 
-        if (!filled) continue;
+        if (!filled || !isFiniteNumber(actualEntry) || !isFiniteNumber(qty)) continue;
 
         openTrade = {
           ...signal,
@@ -180,8 +224,9 @@ export function simulateScenario(candles, config) {
           qty,
           entry: actualEntry,
           entryIdx: i + 1,
+          entryTime: candles[i + 1]?.openTime ?? candle.closeTime,
           entryFeeUsd: entryFee(intendedNotional, isEntryMaker, cfg),
-          entryMaker: openTrade.entryMaker,
+          entryMaker: isEntryMaker,
           engineId,
         };
         engineStats[engineId].filled += 1;
@@ -190,19 +235,20 @@ export function simulateScenario(candles, config) {
     }
 
     if (openTrade) {
-      const side = openTrade.side;
-      const start = openTrade.entryIdx;
+      const trade = openTrade;
+      const side = trade.side;
+      const start = trade.entryIdx;
       let closed = false;
       for (let j = Math.max(i, start); j < Math.min(candles.length, start + cfg.maxHoldCandles); j++) {
         const c = candles[j];
-        const hitSL = side === 'LONG' ? c.low <= openTrade.sl : c.high >= openTrade.sl;
-        const hitTP = side === 'LONG' ? c.high >= openTrade.tp : c.low <= openTrade.tp;
+        const hitSL = side === 'LONG' ? c.low <= trade.sl : c.high >= trade.sl;
+        const hitTP = side === 'LONG' ? c.high >= trade.tp : c.low <= trade.tp;
         if (!hitSL && !hitTP) continue;
 
         let exitType = hitTP && !hitSL ? 'TP' : hitSL && !hitTP ? 'SL' : 'BOTH';
         if (exitType === 'BOTH') {
-          const distToTP = Math.abs(c.open - openTrade.tp);
-          const distToSL = Math.abs(c.open - openTrade.sl);
+          const distToTP = Math.abs(c.open - trade.tp);
+          const distToSL = Math.abs(c.open - trade.sl);
           exitType = distToTP <= distToSL ? 'TP' : 'SL';
         }
 
@@ -210,87 +256,51 @@ export function simulateScenario(candles, config) {
         let isExitMaker = false;
         if (exitType === 'TP') {
           if (cfg.tpMode === 'limit' && Math.random() >= cfg.tpFailRate) {
-            exitPrice = openTrade.tp;
+            exitPrice = trade.tp;
             isExitMaker = true;
           } else {
             const slip = slippageFor('tp', cfg, c);
-            exitPrice = side === 'LONG' ? openTrade.tp - slip : openTrade.tp + slip;
-            isExitMaker = false;
+            exitPrice = side === 'LONG' ? trade.tp - slip : trade.tp + slip;
           }
         } else {
           const slip = slippageFor('sl', cfg, c);
-          exitPrice = side === 'LONG' ? openTrade.sl - slip : openTrade.sl + slip;
-          isExitMaker = false;
+          exitPrice = side === 'LONG' ? trade.sl - slip : trade.sl + slip;
         }
 
-        const grossPnl = side === 'LONG' ? (exitPrice - openTrade.entry) * openTrade.qty : (openTrade.entry - exitPrice) * openTrade.qty;
-        const notionalExit = Math.abs(exitPrice * openTrade.qty);
-        const fees = openTrade.entryFeeUsd + exitFee(notionalExit, isExitMaker, cfg);
-        const pnlUsd = grossPnl - fees;
-        const pnlR = pnlUsd / openTrade.riskUsd;
-        const row = {
-          engine: openTrade.engineId,
-          status: exitType,
-          signalTime: openTrade.signalTime,
-          entryTime: candles[start].openTime,
-          exitTime: c.closeTime,
-          side,
-          entry: openTrade.entry,
-          sl: openTrade.sl,
-          tp: openTrade.tp,
-          exitPrice,
-          qty: openTrade.qty,
-          entryMaker: openTrade.entryMaker,
-          tpMode: cfg.tpMode,
-          pnlUsd,
-          pnlR,
-          entryFeeUsd: openTrade.entryFeeUsd,
-          exitFeeUsd: exitFee(notionalExit, isExitMaker, cfg),
-          slippagePts: exitType === 'SL' ? Math.abs(exitPrice - openTrade.sl) : Math.abs(exitPrice - openTrade.tp),
-        };
+        const row = buildClosedTradeRow(trade, c, exitType, exitPrice, isExitMaker, cfg);
         results.push(row);
         applyCompounding(balanceState, row, cfg, c.closeTime);
-        const es = engineStats[openTrade.engineId];
+        const es = engineStats[trade.engineId];
         if (exitType === 'TP') es.wins += 1; else es.losses += 1;
-        es.netR += pnlR;
+        es.netR += row.pnlR;
         openTrade = null;
         closed = true;
         break;
       }
 
-      if (openTrade && i >= openTrade.entryIdx + cfg.maxHoldCandles) {
-        const c = candles[Math.min(candles.length - 1, openTrade.entryIdx + cfg.maxHoldCandles)];
-        const exitPrice = c.close;
-        const grossPnl = sideSign(openTrade.side) * (exitPrice - openTrade.entry) * openTrade.qty;
-        const notionalExit = Math.abs(exitPrice * openTrade.qty);
-        const fees = openTrade.entryFeeUsd + exitFee(notionalExit, false, cfg);
-        const pnlUsd = grossPnl - fees;
-        const pnlR = pnlUsd / openTrade.riskUsd;
-        const row = {
-          engine: openTrade.engineId, status: 'TIMEOUT', signalTime: openTrade.signalTime, entryTime: candles[openTrade.entryIdx].openTime,
-          exitTime: c.closeTime, side: openTrade.side, entry: openTrade.entry, sl: openTrade.sl, tp: openTrade.tp, exitPrice, qty: openTrade.qty,
-          entryMaker: openTrade.entryMaker, tpMode: cfg.tpMode, pnlUsd, pnlR, entryFeeUsd: openTrade.entryFeeUsd, exitFeeUsd: exitFee(notionalExit, false, cfg), slippagePts: 0,
-        };
+      if (!closed && openTrade && i >= trade.entryIdx + cfg.maxHoldCandles) {
+        const c = candles[Math.min(candles.length - 1, trade.entryIdx + cfg.maxHoldCandles)];
+        const row = buildClosedTradeRow(trade, c, 'TIMEOUT', c.close, false, cfg);
         results.push(row);
         applyCompounding(balanceState, row, cfg, c.closeTime);
-        engineStats[openTrade.engineId].timeouts += 1;
-        engineStats[openTrade.engineId].netR += pnlR;
+        engineStats[trade.engineId].timeouts += 1;
+        engineStats[trade.engineId].netR += row.pnlR;
         openTrade = null;
       }
     }
   }
 
   finalizeCompounding(balanceState);
-  const closedTrades = results.filter(r => ['TP','SL','TIMEOUT'].includes(r.status));
+  const closedTrades = results.filter(r => r && ['TP','SL','TIMEOUT'].includes(r.status));
   const wins = closedTrades.filter(r => r.status === 'TP').length;
   const losses = closedTrades.filter(r => r.status === 'SL').length;
   const timeouts = closedTrades.filter(r => r.status === 'TIMEOUT').length;
-  const netR = closedTrades.reduce((s, r) => s + r.pnlR, 0);
+  const netR = closedTrades.reduce((s, r) => s + (r.pnlR || 0), 0);
   const avgR = closedTrades.length ? netR / closedTrades.length : 0;
   const winRate = (wins + losses) ? wins / (wins + losses) : 0;
-  const totalFeeUsd = closedTrades.reduce((s, r) => s + r.entryFeeUsd + r.exitFeeUsd, 0);
-  const avgSLSlip = avg(closedTrades.filter(r => r.status === 'SL').map(r => r.slippagePts));
-  const avgTPSlip = avg(closedTrades.filter(r => r.status === 'TP').map(r => r.slippagePts));
+  const totalFeeUsd = closedTrades.reduce((s, r) => s + (r.entryFeeUsd || 0) + (r.exitFeeUsd || 0), 0);
+  const avgSLSlip = avg(closedTrades.filter(r => r.status === 'SL').map(r => r.slippagePts || 0));
+  const avgTPSlip = avg(closedTrades.filter(r => r.status === 'TP').map(r => r.slippagePts || 0));
 
   return {
     summary: {
