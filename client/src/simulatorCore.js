@@ -9,6 +9,8 @@ export const ENGINE_RUNNERS = { B: runEngineB, C: runEngineC, D: runEngineD, E: 
 export const DEFAULT_CONFIG = {
   symbol: 'ETHUSDT',
   interval: '5m',
+  startBalance: 10000,
+  selectedYears: [2022, 2023, 2024, 2025],
   riskMode: 'fixed', // fixed | pct
   fixedRisk: 200,
   riskPct: 2,
@@ -42,28 +44,29 @@ export const DEFAULT_CONFIG = {
 function deepClone(obj) { return JSON.parse(JSON.stringify(obj)); }
 function quarterKey(ts) { const d = new Date(ts); return `${d.getUTCFullYear()}-Q${Math.floor(d.getUTCMonth()/3)+1}`; }
 function monthKey(ts) { const d = new Date(ts); return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}`; }
-function sideSign(side) { return side === 'LONG' ? 1 : -1; }
 function avg(arr){ return arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : 0; }
 function isFiniteNumber(n) { return Number.isFinite(Number(n)); }
 
-function getRiskDollar(balance, cfg) {
-  const raw = cfg.riskMode === 'pct' ? balance * (cfg.riskPct / 100) : cfg.fixedRisk;
+function getRiskDollar(riskBalance, cfg) {
+  const raw = cfg.riskMode === 'pct' ? riskBalance * (cfg.riskPct / 100) : cfg.fixedRisk;
   return Math.max(0, Math.min(raw, cfg.riskCap || raw));
 }
 
-function applyCompounding(balanceState, trade, cfg, ts) {
+function applyPnl(balanceState, trade, cfg, ts) {
+  balanceState.equity += trade.pnlUsd;
   const d = new Date(ts);
   const bucket = cfg.compounding === 'daily' ? d.toISOString().slice(0,10)
     : cfg.compounding === 'monthly' ? monthKey(ts)
     : cfg.compounding === 'quarterly' ? quarterKey(ts)
     : null;
+
   if (cfg.compounding === 'none') return;
   if (cfg.compounding === 'per_trade') {
-    balanceState.balance += trade.pnlUsd;
+    balanceState.riskBalance += trade.pnlUsd;
     return;
   }
   if (bucket && balanceState.pendingBucket !== bucket) {
-    if (balanceState.pendingPnl !== 0) balanceState.balance += balanceState.pendingPnl;
+    if (balanceState.pendingPnl !== 0) balanceState.riskBalance += balanceState.pendingPnl;
     balanceState.pendingPnl = 0;
     balanceState.pendingBucket = bucket;
   }
@@ -71,7 +74,7 @@ function applyCompounding(balanceState, trade, cfg, ts) {
 }
 
 function finalizeCompounding(balanceState) {
-  if (balanceState.pendingPnl) balanceState.balance += balanceState.pendingPnl;
+  if (balanceState.pendingPnl) balanceState.riskBalance += balanceState.pendingPnl;
 }
 
 function slippageFor(type, cfg, candle) {
@@ -122,15 +125,16 @@ function makerTouched(signal, candle) {
   return candle && candle.low <= signal.entry && candle.high >= signal.entry;
 }
 
-function entryFee(notional, isMaker, cfg) { return notional * ((isMaker ? cfg.feeMakerBps : cfg.feeTakerBps) / 10000); }
-function exitFee(notional, isMaker, cfg) { return notional * ((isMaker ? cfg.feeMakerBps : cfg.feeTakerBps) / 10000); }
+function feeUsd(notional, isMaker, cfg) {
+  return Math.abs(notional) * ((isMaker ? cfg.feeMakerBps : cfg.feeTakerBps) / 10000);
+}
 
 function buildClosedTradeRow(trade, candle, exitType, exitPrice, isExitMaker, cfg) {
   const grossPnl = trade.side === 'LONG'
     ? (exitPrice - trade.entry) * trade.qty
     : (trade.entry - exitPrice) * trade.qty;
   const notionalExit = Math.abs(exitPrice * trade.qty);
-  const exitFeeUsd = exitFee(notionalExit, isExitMaker, cfg);
+  const exitFeeUsd = feeUsd(notionalExit, isExitMaker, cfg);
   const fees = trade.entryFeeUsd + exitFeeUsd;
   const pnlUsd = grossPnl - fees;
   const pnlR = trade.riskUsd ? pnlUsd / trade.riskUsd : 0;
@@ -153,6 +157,9 @@ function buildClosedTradeRow(trade, candle, exitType, exitPrice, isExitMaker, cf
     pnlR,
     entryFeeUsd: trade.entryFeeUsd,
     exitFeeUsd,
+    grossPnlUsd: grossPnl,
+    entryNotionalUsd: trade.entryNotionalUsd,
+    exitNotionalUsd: notionalExit,
     slippagePts: exitType === 'SL' ? Math.abs(exitPrice - trade.sl) : exitType === 'TP' ? Math.abs(exitPrice - trade.tp) : 0,
   };
 }
@@ -160,16 +167,13 @@ function buildClosedTradeRow(trade, candle, exitType, exitPrice, isExitMaker, cf
 export function simulateScenario(candles, config) {
   const cfg = deepClone({ ...DEFAULT_CONFIG, ...config, engines: { ...DEFAULT_CONFIG.engines, ...(config.engines || {}) } });
   const enabledEngineIds = Object.entries(cfg.engines).filter(([,v]) => v).map(([k]) => k);
-  if (!enabledEngineIds.length) {
-    throw new Error('Enable at least one engine before running the simulator.');
-  }
-  if (!Array.isArray(candles) || candles.length < 120) {
-    throw new Error('Not enough candles loaded to run the simulator.');
-  }
+  if (!enabledEngineIds.length) throw new Error('Enable at least one engine before running the simulator.');
+  if (!Array.isArray(candles) || candles.length < 120) throw new Error('Not enough candles loaded to run the simulator.');
 
   const results = [];
   const engineStats = Object.fromEntries(enabledEngineIds.map(id => [id, { signals: 0, filled: 0, gtxRejected: 0, timeoutMissed: 0, wins: 0, losses: 0, timeouts: 0, netR: 0 }]));
-  const balanceState = { balance: 10000, pendingPnl: 0, pendingBucket: null };
+  const startingBalance = Number(cfg.startBalance || 10000);
+  const balanceState = { equity: startingBalance, riskBalance: startingBalance, pendingPnl: 0, pendingBucket: null };
   let openTrade = null;
 
   for (let i = 80; i < candles.length - 2; i++) {
@@ -186,10 +190,9 @@ export function simulateScenario(candles, config) {
         signal.signalIdx = i;
         engineStats[engineId].signals += 1;
 
-        const riskUsd = getRiskDollar(balanceState.balance, cfg);
+        const riskUsd = getRiskDollar(balanceState.riskBalance, cfg);
         if (!riskUsd || !isFiniteNumber(signal.slDistance) || signal.slDistance <= 0) continue;
         const qty = riskUsd / signal.slDistance;
-        const intendedNotional = Math.abs(qty * signal.entry);
 
         let filled = false;
         let actualEntry = signal.entry;
@@ -212,11 +215,13 @@ export function simulateScenario(candles, config) {
           actualEntry = signal.entry;
         } else {
           filled = true;
-          actualEntry = next1?.open ?? signal.entry;
+          const slip = slippageFor('entry', cfg, next1 ?? candle);
+          actualEntry = signal.side === 'LONG' ? (next1?.open ?? signal.entry) + slip : (next1?.open ?? signal.entry) - slip;
           isEntryMaker = false;
         }
 
         if (!filled || !isFiniteNumber(actualEntry) || !isFiniteNumber(qty)) continue;
+        const entryNotionalUsd = Math.abs(actualEntry * qty);
 
         openTrade = {
           ...signal,
@@ -225,7 +230,8 @@ export function simulateScenario(candles, config) {
           entry: actualEntry,
           entryIdx: i + 1,
           entryTime: candles[i + 1]?.openTime ?? candle.closeTime,
-          entryFeeUsd: entryFee(intendedNotional, isEntryMaker, cfg),
+          entryNotionalUsd,
+          entryFeeUsd: feeUsd(entryNotionalUsd, isEntryMaker, cfg),
           entryMaker: isEntryMaker,
           engineId,
         };
@@ -269,7 +275,7 @@ export function simulateScenario(candles, config) {
 
         const row = buildClosedTradeRow(trade, c, exitType, exitPrice, isExitMaker, cfg);
         results.push(row);
-        applyCompounding(balanceState, row, cfg, c.closeTime);
+        applyPnl(balanceState, row, cfg, c.closeTime);
         const es = engineStats[trade.engineId];
         if (exitType === 'TP') es.wins += 1; else es.losses += 1;
         es.netR += row.pnlR;
@@ -282,7 +288,7 @@ export function simulateScenario(candles, config) {
         const c = candles[Math.min(candles.length - 1, trade.entryIdx + cfg.maxHoldCandles)];
         const row = buildClosedTradeRow(trade, c, 'TIMEOUT', c.close, false, cfg);
         results.push(row);
-        applyCompounding(balanceState, row, cfg, c.closeTime);
+        applyPnl(balanceState, row, cfg, c.closeTime);
         engineStats[trade.engineId].timeouts += 1;
         engineStats[trade.engineId].netR += row.pnlR;
         openTrade = null;
@@ -311,8 +317,9 @@ export function simulateScenario(candles, config) {
       winRate,
       netR,
       avgR,
-      startBalance: 10000,
-      endBalance: balanceState.balance,
+      startBalance: startingBalance,
+      endBalance: balanceState.equity,
+      riskBalanceEnd: balanceState.riskBalance,
       totalFeeUsd,
       avgSLSlip,
       avgTPSlip,
