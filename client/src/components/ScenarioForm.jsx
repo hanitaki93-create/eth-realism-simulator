@@ -1,8 +1,16 @@
 import React from 'react';
 
+const YEARS = [2022, 2023, 2024, 2025];
+
 export default function ScenarioForm({ config, setConfig, onRun, loading }) {
   const set = (k, v) => setConfig(prev => ({ ...prev, [k]: v }));
   const setEngine = (id, v) => setConfig(prev => ({ ...prev, engines: { ...prev.engines, [id]: v } }));
+  const toggleYear = (year) => setConfig(prev => ({
+    ...prev,
+    selectedYears: (prev.selectedYears || []).includes(year)
+      ? prev.selectedYears.filter(y => y !== year)
+      : [...(prev.selectedYears || []), year].sort(),
+  }));
   const riskMode = config.riskMode || 'fixed';
 
   return (
@@ -10,6 +18,7 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
       <div style={{ display:'grid', gridTemplateColumns:'repeat(6, minmax(0,1fr))', gap:12 }}>
         <label>Symbol<input value={config.symbol} onChange={e=>set('symbol', e.target.value.toUpperCase())} /></label>
         <label>Interval<input value={config.interval} onChange={e=>set('interval', e.target.value)} /></label>
+        <label>Account Value<input type="number" step="100" value={config.startBalance} onChange={e=>set('startBalance', +e.target.value)} /></label>
         <label>Risk Mode<select value={riskMode} onChange={e=>set('riskMode', e.target.value)}><option value="fixed">Fixed $</option><option value="pct">% of balance</option></select></label>
         {riskMode === 'fixed'
           ? <label>Fixed R<input type="number" value={config.fixedRisk} onChange={e=>set('fixedRisk', +e.target.value)} /></label>
@@ -29,6 +38,14 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
         <label>Slip Preset<select value={config.slippagePreset} onChange={e=>set('slippagePreset', e.target.value)}><option value="baseline">Baseline</option><option value="realistic">Realistic</option><option value="stress">Stress</option></select></label>
         <label>TP Slip pts<input type="number" step="0.01" value={config.slippageBasePts.tp} onChange={e=>set('slippageBasePts', { ...config.slippageBasePts, tp: +e.target.value })} /></label>
         <label>SL Slip pts<input type="number" step="0.01" value={config.slippageBasePts.sl} onChange={e=>set('slippageBasePts', { ...config.slippageBasePts, sl: +e.target.value })} /></label>
+      </div>
+      <div style={{ display:'flex', gap:12, marginTop:12, alignItems:'center', flexWrap:'wrap' }}>
+        <div>Years:</div>
+        {YEARS.map(year => (
+          <button key={year} type="button" className={(config.selectedYears || []).includes(year) ? 'primary' : ''} onClick={() => toggleYear(year)}>
+            {year}
+          </button>
+        ))}
       </div>
       <div style={{ display:'flex', gap:12, marginTop:12, alignItems:'center', flexWrap:'wrap' }}>
         {['B','C','D','E','F'].map(id => <label key={id}><input type="checkbox" checked={!!config.engines[id]} onChange={e=>setEngine(id,e.target.checked)} /> {id}</label>)}
