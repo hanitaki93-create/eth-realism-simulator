@@ -1,95 +1,77 @@
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+const express = require('express');
+const cors = require('cors');
+const fetch = require('node-fetch');
+const path = require('path');
 
-:root {
-  --bg: #0f1117;
-  --bg2: #161b27;
-  --bg3: #1c2333;
-  --border: rgba(255,255,255,0.08);
-  --border2: rgba(255,255,255,0.14);
-  --text: #e2e8f0;
-  --text2: #8892a4;
-  --text3: #4a5568;
-  --green: #22c55e;
-  --red: #ef4444;
-  --blue: #3b82f6;
-  --amber: #f59e0b;
-  --purple: #a78bfa;
-  --teal: #14b8a6;
-  --radius: 8px;
-  --radius-lg: 12px;
+const app = express();
+const PORT = process.env.PORT || 3001;
+app.use(cors());
+app.use(express.json({ limit: '2mb' }));
+
+const BINANCE_BASE = 'https://api.binance.com/api/v3';
+const MAX_PER_REQUEST = 1000;
+const INTERVAL_MS = {
+  '1m': 60000, '3m': 180000, '5m': 300000, '15m': 900000,
+  '30m': 1800000, '1h': 3600000, '4h': 14400000, '1d': 86400000
+};
+
+async function fetchPaginated(symbol, interval, totalCandles = null, startTimeOverride = null, endTimeOverride = null) {
+  const intervalMs = INTERVAL_MS[interval] || 300000;
+  let startTime = startTimeOverride !== null ? startTimeOverride : Date.now() - (totalCandles || 2000) * intervalMs;
+  const endTime = endTimeOverride !== null ? endTimeOverride : null;
+  let allCandles = [];
+
+  while (true) {
+    if (totalCandles !== null && allCandles.length >= totalCandles) break;
+    if (endTime !== null && startTime > endTime) break;
+
+    const limit = Math.min(MAX_PER_REQUEST, totalCandles !== null ? (totalCandles - allCandles.length) : MAX_PER_REQUEST);
+    let url = `${BINANCE_BASE}/klines?symbol=${symbol}&interval=${interval}&startTime=${startTime}&limit=${limit}`;
+    if (endTime !== null) url += `&endTime=${endTime}`;
+
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Binance error: ${response.status}`);
+    const data = await response.json();
+    if (!data.length) break;
+
+    const candles = data.map(k => ({
+      openTime: k[0], open: Number(k[1]), high: Number(k[2]), low: Number(k[3]), close: Number(k[4]), volume: Number(k[5]), closeTime: k[6]
+    }));
+
+    allCandles = allCandles.concat(candles);
+    const lastOpen = candles[candles.length - 1].openTime;
+    startTime = lastOpen + intervalMs;
+    if (candles.length < limit) break;
+  }
+
+  return totalCandles !== null ? allCandles.slice(0, totalCandles) : allCandles;
 }
 
-body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  font-size: 13px;
-  line-height: 1.5;
-  min-height: 100vh;
+app.get('/api/klines', async (req, res) => {
+  try {
+    const { symbol = 'ETHUSDT', interval = '5m', limit, startTime, endTime } = req.query;
+    const parsedLimit = limit != null ? Math.min(parseInt(limit, 10), 120000) : null;
+    const candles = await fetchPaginated(
+      symbol,
+      interval,
+      parsedLimit,
+      startTime ? parseInt(startTime, 10) : null,
+      endTime ? parseInt(endTime, 10) : null,
+    );
+    res.json({ ok: true, candles, count: candles.length });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get('/health', (_, res) => res.json({ ok: true, time: new Date().toISOString() }));
+
+if (process.env.NODE_ENV === 'production') {
+  const clientDist = path.join(__dirname, '..', 'client', 'dist');
+  app.use(express.static(clientDist));
+  app.get('*', (_, res) => res.sendFile(path.join(clientDist, 'index.html')));
 }
 
-::-webkit-scrollbar { width: 5px; height: 5px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
-
-button {
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 12px;
-  border: 0.5px solid var(--border2);
-  background: transparent;
-  color: var(--text2);
-  padding: 5px 12px;
-  border-radius: var(--radius);
-  transition: background 0.15s, color 0.15s;
-}
-button:hover { background: var(--bg3); color: var(--text); }
-button.primary { background: var(--blue); color: #fff; border-color: var(--blue); }
-button.primary:hover { background: #2563eb; }
-button.danger { color: var(--red); border-color: rgba(239,68,68,0.3); }
-button.active { background: var(--text); color: var(--bg); border-color: var(--text); }
-
-table { width: 100%; border-collapse: collapse; }
-th { text-align: left; color: var(--text3); font-weight: 400; font-size: 11px; padding: 6px 8px; border-bottom: 0.5px solid var(--border); text-transform: uppercase; letter-spacing: .04em; }
-td { padding: 6px 8px; border-bottom: 0.5px solid var(--border); color: var(--text2); font-size: 12px; }
-td:first-child { color: var(--text); }
-tr:last-child td { border-bottom: none; }
-tr:hover td { background: rgba(255,255,255,0.02); }
-
-.card {
-  background: var(--bg2);
-  border: 0.5px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 14px 16px;
-}
-
-.pill {
-  display: inline-block;
-  font-size: 10px;
-  font-weight: 600;
-  padding: 2px 7px;
-  border-radius: 100px;
-  letter-spacing: .03em;
-}
-.pill-long  { background: rgba(34,197,94,0.15);  color: #4ade80; }
-.pill-short { background: rgba(239,68,68,0.15);  color: #f87171; }
-.pill-active    { background: rgba(59,130,246,0.15);  color: #60a5fa; }
-.pill-pending   { background: rgba(245,158,11,0.15);  color: #fbbf24; }
-.pill-cancelled { background: rgba(255,255,255,0.06); color: var(--text3); }
-.pill-win       { background: rgba(34,197,94,0.15);   color: #4ade80; }
-.pill-loss  { background: rgba(239,68,68,0.15);  color: #f87171; }
-.pill-timeout { background: rgba(255,255,255,0.06); color: var(--text3); }
-.pill-settled { background: rgba(255,255,255,0.06); color: var(--text3); }
-
-.dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
-.dot-live { background: var(--green); box-shadow: 0 0 6px var(--green); }
-.dot-idle { background: var(--text3); }
-.dot-err  { background: var(--red); }
-.dot-replay { background: var(--amber); }
-
-.card{background:#111827;border:1px solid #374151;border-radius:10px;padding:14px;}
-input,select{width:100%;margin-top:4px;background:#0b1220;color:#e5e7eb;border:1px solid #374151;border-radius:6px;padding:6px 8px;}
-label{font-size:12px;color:#cbd5e1;}
-button.primary{background:#2563eb;color:#fff;border:none;padding:8px 12px;border-radius:8px;}
-.sim-table{width:100%;border-collapse:collapse;font-size:12px;}
-.sim-table th,.sim-table td{border-bottom:1px solid #374151;padding:6px 8px;text-align:left;}
+app.listen(PORT, () => {
+  console.log(`ETH Realism Simulator backend running on http://localhost:${PORT}`);
+});
