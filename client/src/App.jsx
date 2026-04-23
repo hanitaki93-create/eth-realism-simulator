@@ -1,3 +1,4 @@
+
 import React, { useMemo, useState } from 'react';
 import ScenarioForm from './components/ScenarioForm.jsx';
 import { DEFAULT_CONFIG, simulateScenario } from './simulatorCore.js';
@@ -8,7 +9,12 @@ function mergeEngineStats(yearly) {
   const merged = {};
   for (const y of yearly) {
     for (const [id, s] of Object.entries(y.engineStats || {})) {
-      if (!merged[id]) merged[id] = { signals: 0, filled: 0, gtxRejected: 0, timeoutMissed: 0, wins: 0, losses: 0, timeouts: 0, netR: 0 };
+      if (!merged[id]) {
+        merged[id] = {
+          rawDetections: 0, blockedByLifecycle: 0, signals: 0, pendingCancelled: 0, activated: 0,
+          filled: 0, gtxRejected: 0, timeoutMissed: 0, settled: 0, wins: 0, losses: 0, timeouts: 0, netR: 0,
+        };
+      }
       for (const key of Object.keys(merged[id])) merged[id][key] += Number(s[key] || 0);
     }
   }
@@ -19,7 +25,7 @@ export default function App() {
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [status, setStatus] = useState('Select year(s) and run a scenario.');
+  const [status, setStatus] = useState('Select a year or All 4 years and run a scenario.');
 
   async function runScenario() {
     const years = [...(config.selectedYears || [])].sort();
@@ -36,18 +42,27 @@ export default function App() {
       const yearly = [];
 
       for (const year of years) {
-        setStatus(`Fetching ${year} candles…`);
+        setStatus(`Fetching ${year} candles in chunks…`);
         const resp = await fetch(`/api/klines-year?symbol=${config.symbol}&interval=${config.interval}&year=${year}`);
         const json = await resp.json();
         if (!json.ok) throw new Error(json.error || `Failed to fetch ${year}`);
 
         setStatus(`Running ${year} simulation on ${json.candles.length.toLocaleString()} candles…`);
-        const sim = simulateScenario(json.candles, { ...config, startingBalance: runningBalance });
-        yearly.push({ year, candles: json.candles.length, summary: sim.summary, engineStats: sim.engineStats, results: sim.results });
+        const runConfig = { ...config, selectedYears: [year], startingBalance: runningBalance };
+        const sim = simulateScenario(json.candles, runConfig);
+        yearly.push({
+          year,
+          candles: json.candles.length,
+          chunksUsed: json.chunksUsed || null,
+          summary: sim.summary,
+          engineStats: sim.engineStats,
+          results: sim.results,
+          actualConfig: sim.actualConfig,
+        });
         runningBalance = sim.summary.endBalance;
       }
 
-      const allClosedTrades = yearly.flatMap(y => (y.results || []).filter(r => ['TP', 'SL', 'TIMEOUT'].includes(r.status)));
+      const allClosedTrades = yearly.flatMap(y => y.results || []);
       const totalNetR = yearly.reduce((s, y) => s + (y.summary?.netR || 0), 0);
       const totalFees = yearly.reduce((s, y) => s + (y.summary?.totalFeeUsd || 0), 0);
       const wins = allClosedTrades.filter(r => r.status === 'TP').length;
@@ -55,6 +70,7 @@ export default function App() {
       const timeouts = allClosedTrades.filter(r => r.status === 'TIMEOUT').length;
       const avgR = allClosedTrades.length ? totalNetR / allClosedTrades.length : 0;
       const winRate = (wins + losses) ? wins / (wins + losses) : 0;
+      const mergedEngineStats = mergeEngineStats(yearly);
 
       setResult({
         yearly,
@@ -71,10 +87,14 @@ export default function App() {
           totalFeeUsd: totalFees,
           avgSLSlip: yearly.length ? yearly.reduce((s, y) => s + (y.summary?.avgSLSlip || 0), 0) / yearly.length : 0,
           avgTPSlip: yearly.length ? yearly.reduce((s, y) => s + (y.summary?.avgTPSlip || 0), 0) / yearly.length : 0,
-          loadedCandles: yearly.reduce((s, y) => s + y.candles, 0)
+          loadedCandles: yearly.reduce((s, y) => s + y.candles, 0),
+          maxRiskUsed: Math.max(0, ...yearly.map(y => Number(y.summary?.maxRiskUsed || 0))),
+          actualRiskModeUsed: yearly[0]?.summary?.actualRiskModeUsed || config.riskMode,
         },
-        engineStats: mergeEngineStats(yearly),
-        results: allClosedTrades
+        engineStats: mergedEngineStats,
+        results: allClosedTrades,
+        yearsRun: years,
+        actualConfig: { ...config, selectedYears: years },
       });
 
       setStatus(`Simulation complete. ${allClosedTrades.length.toLocaleString()} closed trades across ${years.join(', ')}.`);
@@ -88,7 +108,7 @@ export default function App() {
   const topRows = useMemo(() => (result?.results || []).slice(-50).reverse(), [result]);
 
   return (
-    <div style={{ maxWidth: 1400, margin: '0 auto', padding: 20 }}>
+    <div style={{ maxWidth: 1500, margin: '0 auto', padding: 20 }}>
       <h1 style={{ marginBottom: 4 }}>ETH Binance Realism Simulator</h1>
       <div style={{ color: 'var(--text2)', marginBottom: 16 }}>MVP built on top of the V5 baseline engine code.</div>
 
@@ -98,8 +118,11 @@ export default function App() {
 
       {result && (
         <>
-          <div className="card" style={{ marginBottom: 16 }}>
-            Loaded candles: {result.summary.loadedCandles.toLocaleString()}
+          <div className="card" style={{ marginBottom: 16, display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+            <div>Years run: <strong>{result.yearsRun.join(', ')}</strong></div>
+            <div>Loaded candles: <strong>{result.summary.loadedCandles.toLocaleString()}</strong></div>
+            <div>Actual risk mode: <strong>{result.summary.actualRiskModeUsed === 'pct' ? '% of account' : 'Fixed $'}</strong></div>
+            <div>Max R used: <strong>{fmt(result.summary.maxRiskUsed, 2)}</strong></div>
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(8, minmax(0,1fr))', gap: 10, marginBottom: 16 }}>
@@ -120,21 +143,23 @@ export default function App() {
             ))}
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1.15fr 0.85fr', gap: 16, marginBottom: 16 }}>
             <div className="card">
-              <h3 style={{ marginBottom: 10 }}>Engine breakdown</h3>
+              <h3 style={{ marginBottom: 10 }}>Engine diagnostics</h3>
               <table className="sim-table">
                 <thead>
-                  <tr><th>Engine</th><th>Signals</th><th>Filled</th><th>GTX rej</th><th>Missed</th><th>Wins</th><th>Losses</th><th>Net R</th></tr>
+                  <tr><th>Engine</th><th>Raw</th><th>Blocked</th><th>Pending</th><th>Cancelled</th><th>Activated</th><th>Settled</th><th>Wins</th><th>Losses</th><th>Net R</th></tr>
                 </thead>
                 <tbody>
                   {Object.entries(result.engineStats).map(([id, s]) => (
                     <tr key={id}>
                       <td>{id}</td>
+                      <td>{s.rawDetections}</td>
+                      <td>{s.blockedByLifecycle}</td>
                       <td>{s.signals}</td>
-                      <td>{s.filled}</td>
-                      <td>{s.gtxRejected}</td>
-                      <td>{s.timeoutMissed}</td>
+                      <td>{s.pendingCancelled}</td>
+                      <td>{s.activated}</td>
+                      <td>{s.settled}</td>
                       <td>{s.wins}</td>
                       <td>{s.losses}</td>
                       <td>{fmt(s.netR, 2)}</td>
@@ -150,8 +175,9 @@ export default function App() {
               <div>Avg TP slip: {fmt(result.summary.avgTPSlip, 2)} pts</div>
               <div>Start balance: {fmt(result.summary.startBalance, 2)}</div>
               <div>End balance: {fmt(result.summary.endBalance, 2)}</div>
-              <div style={{ marginTop: 10, color: 'var(--text3)' }}>Config snapshot</div>
-              <pre style={{ whiteSpace: 'pre-wrap', fontSize: 11, marginTop: 8 }}>{JSON.stringify(config, null, 2)}</pre>
+              <div>Fees deducted: {fmt(result.summary.totalFeeUsd, 2)}</div>
+              <div style={{ marginTop: 10, color: 'var(--text3)' }}>Actual config used</div>
+              <pre style={{ whiteSpace: 'pre-wrap', fontSize: 11, marginTop: 8 }}>{JSON.stringify(result.actualConfig, null, 2)}</pre>
             </div>
           </div>
 
@@ -159,12 +185,13 @@ export default function App() {
             <h3 style={{ marginBottom: 10 }}>Year-by-year summary</h3>
             <table className="sim-table">
               <thead>
-                <tr><th>Year</th><th>Candles</th><th>Trades</th><th>WR %</th><th>Net R</th><th>Start</th><th>End</th><th>Fees</th></tr>
+                <tr><th>Year</th><th>Chunks</th><th>Candles</th><th>Trades</th><th>WR %</th><th>Net R</th><th>Start</th><th>End</th><th>Fees</th></tr>
               </thead>
               <tbody>
                 {result.yearly.map(y => (
                   <tr key={y.year}>
                     <td>{y.year}</td>
+                    <td>{y.chunksUsed ?? '—'}</td>
                     <td>{y.candles.toLocaleString()}</td>
                     <td>{y.summary.trades}</td>
                     <td>{fmt(y.summary.winRate * 100, 2)}</td>
