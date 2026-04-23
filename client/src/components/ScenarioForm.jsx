@@ -1,3 +1,4 @@
+
 import React from 'react';
 
 const YEARS = [2022, 2023, 2024, 2025];
@@ -5,11 +6,8 @@ const YEARS = [2022, 2023, 2024, 2025];
 export default function ScenarioForm({ config, setConfig, onRun, loading }) {
   const set = (k, v) => setConfig(prev => ({ ...prev, [k]: v }));
   const setEngine = (id, v) => setConfig(prev => ({ ...prev, engines: { ...prev.engines, [id]: v } }));
-  const toggleYear = (year) => setConfig(prev => {
-    const current = new Set(prev.selectedYears || []);
-    if (current.has(year)) current.delete(year); else current.add(year);
-    return { ...prev, selectedYears: [...current].sort() };
-  });
+  const setSingleYear = (year) => setConfig(prev => ({ ...prev, selectedYears: [year] }));
+  const setAllYears = () => setConfig(prev => ({ ...prev, selectedYears: [...YEARS] }));
 
   return (
     <div className="card" style={{ marginBottom: 16 }}>
@@ -21,7 +19,7 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
         {config.riskMode === 'fixed'
           ? <label>Fixed R<input type="number" value={config.fixedRisk} onChange={e => set('fixedRisk', +e.target.value)} /></label>
           : <label>Risk %<input type="number" step="0.1" value={config.riskPct} onChange={e => set('riskPct', +e.target.value)} /></label>}
-        <label>R Cap<input type="number" value={config.riskCap} onChange={e => set('riskCap', +e.target.value)} /></label>
+        <label>Max R Cap<input type="number" value={config.riskCap} onChange={e => set('riskCap', +e.target.value)} /></label>
 
         <label>Compounding<select value={config.compounding} onChange={e => set('compounding', e.target.value)}><option value="none">None</option><option value="per_trade">Per trade</option><option value="daily">Daily</option><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option></select></label>
         <label>Entry Mode<select value={config.entryMode} onChange={e => set('entryMode', e.target.value)}><option value="maker_gtx">Maker GTX</option><option value="taker_market">Taker Market</option></select></label>
@@ -43,10 +41,12 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
       <div style={{ display: 'flex', gap: 8, marginTop: 14, alignItems: 'center', flexWrap: 'wrap' }}>
         <span style={{ color: 'var(--text3)' }}>Years:</span>
         {YEARS.map(year => (
-          <button key={year} type="button" className={config.selectedYears?.includes(year) ? 'active' : ''} onClick={() => toggleYear(year)}>
+          <button key={year} type="button" className={config.selectedYears?.length === 1 && config.selectedYears[0] === year ? 'active' : ''} onClick={() => setSingleYear(year)}>
             {year}
           </button>
         ))}
+        <button type="button" className={config.selectedYears?.length === YEARS.length ? 'active' : ''} onClick={setAllYears}>All 4 years</button>
+        <span style={{ color: 'var(--text3)' }}>Selected: {(config.selectedYears || []).join(', ')}</span>
       </div>
 
       <div style={{ display: 'flex', gap: 12, marginTop: 12, alignItems: 'center', flexWrap: 'wrap' }}>
