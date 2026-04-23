@@ -1,3 +1,4 @@
+
 import { runEngineB } from './engines/engineB.js';
 import { runEngineC } from './engines/engineC.js';
 import { runEngineD } from './engines/engineD.js';
@@ -19,16 +20,16 @@ export const DEFAULT_CONFIG = {
   tpRMultiple: 2,
   slMultiplier: 1,
   minSlFloor: 0,
-  entryMode: 'maker_gtx', // maker_gtx | taker_market
+  entryMode: 'maker_gtx',
   entryOffset: 0,
   entryTimeoutCandles: 2,
-  makerEntryRejectRate: 0, // deprecated for now; structural GTX modeling will replace this
+  makerEntryRejectRate: 0,
   makerEntryMissAfterTouchRate: 0,
-  tpMode: 'market', // market | limit
+  tpMode: 'market',
   tpFailRate: 0.005,
   feeMakerBps: 2,
   feeTakerBps: 5,
-  slippagePreset: 'realistic', // baseline | realistic | stress
+  slippagePreset: 'realistic',
   slippageBasePts: { entry: 0, tp: 0.15, sl: 0.26 },
   maxHoldCandles: 288,
   engines: { B: false, C: false, D: true, E: true, F: false },
@@ -40,9 +41,9 @@ function quarterKey(ts) { const d = new Date(ts); return `${d.getUTCFullYear()}-
 function monthKey(ts) { const d = new Date(ts); return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}`; }
 function dayKey(ts) { return new Date(ts).toISOString().slice(0,10); }
 function sideSign(side) { return side === 'LONG' ? 1 : -1; }
-function clamp(n, min, max) { return Math.max(min, Math.min(max, n)); }
 function round2(n) { return Math.round((n + Number.EPSILON) * 100) / 100; }
 function round4(n) { return Math.round((n + Number.EPSILON) * 10000) / 10000; }
+function round8(n) { return Math.round((n + Number.EPSILON) * 1e8) / 1e8; }
 
 function getBucket(ts, freq) {
   if (freq === 'daily') return dayKey(ts);
@@ -168,10 +169,6 @@ function settleSignal(signal, outcome, candle, candleIdx, cfg) {
   } else if (outcome === 'LOSS') {
     slipPts = slippageFor('sl', cfg, candle);
     exitPrice = signal.side === 'LONG' ? signal.stop_loss - slipPts : signal.stop_loss + slipPts;
-    exitMaker = false;
-  } else {
-    exitPrice = candle.close;
-    exitMaker = false;
   }
 
   const grossPnlUsd = sideSign(signal.side) * (exitPrice - signal.entry_price_actual) * signal.qty;
@@ -195,17 +192,34 @@ function settleSignal(signal, outcome, candle, candleIdx, cfg) {
   };
 }
 
+function baseEngineStats() {
+  return {
+    rawDetections: 0,
+    blockedByLifecycle: 0,
+    signals: 0,
+    pendingCancelled: 0,
+    activated: 0,
+    filled: 0,
+    gtxRejected: 0,
+    timeoutMissed: 0,
+    settled: 0,
+    wins: 0,
+    losses: 0,
+    timeouts: 0,
+    netR: 0,
+  };
+}
+
 export function simulateScenario(candles, config) {
   const cfg = deepClone({ ...DEFAULT_CONFIG, ...config, engines: { ...DEFAULT_CONFIG.engines, ...(config.engines || {}) } });
   const enabledEngineIds = Object.entries(cfg.engines).filter(([,v]) => v).map(([k]) => k);
-  const engineStats = Object.fromEntries(enabledEngineIds.map(id => [id, {
-    signals: 0, filled: 0, gtxRejected: 0, timeoutMissed: 0, wins: 0, losses: 0, timeouts: 0, netR: 0,
-  }]));
+  const engineStats = Object.fromEntries(enabledEngineIds.map(id => [id, baseEngineStats()]));
   const account = {
     startingBalance: Number(cfg.startingBalance || 10000),
     balance: Number(cfg.startingBalance || 10000),
     pendingPnl: 0,
     pendingBucket: null,
+    maxRiskUsed: 0,
   };
 
   const signals = [];
@@ -214,9 +228,8 @@ export function simulateScenario(candles, config) {
   for (let i = warmup; i < candles.length; i++) {
     const lastClosed = candles[i];
     const closed = candles.slice(0, i + 1);
-    const prevSignals = signals.slice(); // snapshot at start of candle, like V5 signalsRef.current
+    const prevSignals = signals.slice();
 
-    // STEP 1 — pending confirmation window
     for (let k = 0; k < signals.length; k++) {
       const sig = signals[k];
       if (sig.status !== 'pending') continue;
@@ -230,10 +243,12 @@ export function simulateScenario(candles, config) {
           cancel_candle: elapsed,
           settle_timestamp: lastClosed.closeTime,
         };
+        engineStats[sig.engine].pendingCancelled += 1;
         continue;
       }
       if (elapsed >= cfg.entryTimeoutCandles) {
         const riskUsd = getRiskDollar(account, cfg);
+        account.maxRiskUsed = Math.max(account.maxRiskUsed, riskUsd);
         const qty = riskUsd > 0 ? (riskUsd / sig.sl_distance) : 0;
         const entryIsMaker = cfg.entryMode === 'maker_gtx';
         const entrySlip = entryIsMaker ? 0 : slippageFor('entry', cfg, lastClosed);
@@ -252,11 +267,11 @@ export function simulateScenario(candles, config) {
           entry_fee_usd: round4(entryFeeUsd),
           entry_maker: entryIsMaker,
         };
+        engineStats[sig.engine].activated += 1;
         engineStats[sig.engine].filled += 1;
       }
     }
 
-    // STEP 2 — settle active signals on this candle
     for (let k = 0; k < signals.length; k++) {
       const sig = signals[k];
       if (sig.status !== 'active') continue;
@@ -275,26 +290,29 @@ export function simulateScenario(candles, config) {
       signals[k] = settleSignal(sig, outcome, lastClosed, i, cfg);
     }
 
-    // STEP 3 — apply account settlement exactly once
     for (let k = 0; k < signals.length; k++) {
       const sig = signals[k];
       if (sig.status !== 'settled' || sig.settlement_applied) continue;
       applyCompounding(account, sig.pnl_usd || 0, sig.settle_timestamp || lastClosed.closeTime, cfg);
       signals[k] = { ...sig, settlement_applied: 1 };
+      engineStats[sig.engine].settled += 1;
       if (sig.outcome === 'WIN') engineStats[sig.engine].wins += 1;
       else if (sig.outcome === 'LOSS') engineStats[sig.engine].losses += 1;
       else if (sig.outcome === 'TIMEOUT') engineStats[sig.engine].timeouts += 1;
       engineStats[sig.engine].netR += Number(sig.pnl_r || 0);
     }
 
-    // STEP 4 — run engines on current closed slice, append new pending signals
     for (const engineId of enabledEngineIds) {
       const runner = ENGINE_RUNNERS[engineId];
       const diag = runner?.(closed);
       if (!diag?.fired || !diag.signal) continue;
 
+      engineStats[engineId].rawDetections += 1;
       const activeSameEngine = prevSignals.find(sig => sig.engine === engineId && (sig.status === 'pending' || sig.status === 'active'));
-      if (activeSameEngine) continue;
+      if (activeSameEngine) {
+        engineStats[engineId].blockedByLifecycle += 1;
+        continue;
+      }
 
       const sigRow = buildSignalRow(engineId, diag, lastClosed, i, cfg);
       if (!sigRow) continue;
@@ -351,11 +369,12 @@ export function simulateScenario(candles, config) {
       totalFeeUsd: round2(totalFeeUsd),
       avgSLSlip: round4(avgSLSlip),
       avgTPSlip: round4(avgTPSlip),
+      actualRiskModeUsed: cfg.riskMode,
+      maxRiskUsed: round2(account.maxRiskUsed),
     },
     engineStats,
     results,
     signalLedger: signals,
+    actualConfig: cfg,
   };
 }
-
-function round8(n) { return Math.round((n + Number.EPSILON) * 1e8) / 1e8; }
