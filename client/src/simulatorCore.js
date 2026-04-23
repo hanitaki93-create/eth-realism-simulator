@@ -3,7 +3,9 @@ import { runEngineC } from './engines/engineC.js';
 import { runEngineD } from './engines/engineD.js';
 import { runEngineE } from './engines/engineE.js';
 import { runEngineF } from './engines/engineF.js';
-
+function finiteNum(x, fallback = 0) {
+  return Number.isFinite(x) ? x : fallback;
+}
 export const ENGINE_RUNNERS = { B: runEngineB, C: runEngineC, D: runEngineD, E: runEngineE, F: runEngineF };
 
 export const DEFAULT_CONFIG = {
