@@ -1,3 +1,4 @@
+
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
@@ -27,6 +28,7 @@ async function fetchPaginatedRange(symbol, interval, startTime, endTime) {
   const intervalMs = INTERVAL_MS[interval] || 300000;
   let cursor = startTime;
   const allCandles = [];
+  let chunksUsed = 0;
 
   while (cursor < endTime) {
     const url = `${BINANCE_BASE}/klines?symbol=${symbol}&interval=${interval}&startTime=${cursor}&endTime=${endTime}&limit=${MAX_PER_REQUEST}`;
@@ -46,13 +48,14 @@ async function fetchPaginatedRange(symbol, interval, startTime, endTime) {
     }));
 
     allCandles.push(...candles);
+    chunksUsed += 1;
 
     const nextCursor = candles[candles.length - 1].openTime + intervalMs;
     if (nextCursor <= cursor) break;
     cursor = nextCursor;
   }
 
-  return allCandles.filter(c => c.openTime >= startTime && c.openTime < endTime);
+  return { candles: allCandles.filter(c => c.openTime >= startTime && c.openTime < endTime), chunksUsed };
 }
 
 app.get('/api/klines-year', async (req, res) => {
@@ -62,15 +65,15 @@ app.get('/api/klines-year', async (req, res) => {
 
     const cacheKey = `${symbol}|${interval}|${year}`;
     if (yearCache.has(cacheKey)) {
-      const candles = yearCache.get(cacheKey);
-      return res.json({ ok: true, candles, count: candles.length, cached: true, year: Number(year) });
+      const cached = yearCache.get(cacheKey);
+      return res.json({ ok: true, candles: cached.candles, count: cached.candles.length, cached: true, year: Number(year), chunksUsed: cached.chunksUsed });
     }
 
     const { start, end } = yearRangeUtc(year);
-    const candles = await fetchPaginatedRange(symbol, interval, start, end);
-    yearCache.set(cacheKey, candles);
+    const payload = await fetchPaginatedRange(symbol, interval, start, end);
+    yearCache.set(cacheKey, payload);
 
-    res.json({ ok: true, candles, count: candles.length, cached: false, year: Number(year) });
+    res.json({ ok: true, candles: payload.candles, count: payload.candles.length, cached: false, year: Number(year), chunksUsed: payload.chunksUsed });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
