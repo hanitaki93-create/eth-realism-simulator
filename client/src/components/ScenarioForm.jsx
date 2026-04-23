@@ -29,7 +29,8 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
         <label>Min SL Floor<input type="number" step="0.1" value={config.minSlFloor} onChange={e => set('minSlFloor', +e.target.value)} /></label>
 
         <label>Entry Offset<input type="number" step="0.01" value={config.entryOffset} onChange={e => set('entryOffset', +e.target.value)} /></label>
-        <label>GTX Reject %<input type="number" step="0.1" value={config.makerEntryRejectRate * 100} onChange={e => set('makerEntryRejectRate', +e.target.value / 100)} /></label>
+        <label>Extra GTX stress %<input type="number" step="0.1" value={config.makerEntryRejectRate * 100} onChange={e => set('makerEntryRejectRate', +e.target.value / 100)} /></label>
+        <label>Touch-no-fill stress %<input type="number" step="0.1" value={config.makerEntryMissAfterTouchRate * 100} onChange={e => set('makerEntryMissAfterTouchRate', +e.target.value / 100)} /></label>
         <label>TP Fail %<input type="number" step="0.1" value={config.tpFailRate * 100} onChange={e => set('tpFailRate', +e.target.value / 100)} /></label>
         <label>Maker Fee bps<input type="number" step="0.1" value={config.feeMakerBps} onChange={e => set('feeMakerBps', +e.target.value)} /></label>
         <label>Taker Fee bps<input type="number" step="0.1" value={config.feeTakerBps} onChange={e => set('feeTakerBps', +e.target.value)} /></label>
