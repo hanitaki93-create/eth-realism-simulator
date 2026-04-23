@@ -240,31 +240,38 @@ function makerDecision(signal, candle, cfg) {
   const range = Math.max(0.0001, candle.high - candle.low);
   const touch = side === 'LONG' ? candle.low <= entry : candle.high >= entry;
   const marketableAtOpen = side === 'LONG' ? candle.open <= entry : candle.open >= entry;
+  const gap = marketableAtOpen
+    ? (side === 'LONG' ? Math.max(0, entry - candle.open) : Math.max(0, candle.open - entry))
+    : 0;
+  const gapFrac = clamp(gap / range, 0, 1);
 
-  if (marketableAtOpen) return { action: 'gtx_reject', reason: 'marketable_at_open' };
-  if (!touch) return { action: 'wait', reason: 'not_touched' };
+  // If price never comes back to the entry level during the candle, just keep waiting.
+  // A 5m bar cannot justify a hard reject here.
+  if (!touch) return { action: 'wait', reason: marketableAtOpen ? 'opened_through_no_retrace' : 'not_touched' };
 
   const overshoot = side === 'LONG' ? Math.max(0, entry - candle.low) : Math.max(0, candle.high - entry);
   const overshootFrac = clamp(overshoot / range, 0, 1);
-  const baseMiss = 0.05;
-  const wideCandleBump = range > 15 ? 0.05 : range > 8 ? 0.02 : 0;
-  const overshootBump = overshootFrac > 0.5 ? 0.08 : overshootFrac > 0.25 ? 0.04 : 0;
-  const lowConfidenceBump = signal.confidence < 0.55 ? 0.03 : 0;
+  const baseMiss = 0.015;
+  const wideCandleBump = range > 15 ? 0.03 : range > 8 ? 0.015 : 0;
+  const overshootBump = overshootFrac > 0.5 ? 0.05 : overshootFrac > 0.25 ? 0.025 : 0;
+  const lowConfidenceBump = signal.confidence < 0.55 ? 0.02 : 0;
+  const marketableBump = marketableAtOpen ? (gapFrac > 0.6 ? 0.12 : gapFrac > 0.25 ? 0.06 : 0.025) : 0;
   const extraStressMiss = clamp(Number(cfg.makerEntryMissAfterTouchRate || 0), 0, 0.5);
   const extraStressReject = clamp(Number(cfg.makerEntryRejectRate || 0), 0, 0.5);
-  const missProb = clamp(baseMiss + wideCandleBump + overshootBump + lowConfidenceBump + extraStressMiss, 0, 0.75);
-  const rejectProb = clamp(extraStressReject, 0, 0.5);
+  const missProb = clamp(baseMiss + wideCandleBump + overshootBump + lowConfidenceBump + marketableBump + extraStressMiss, 0, 0.45);
+  const rejectProb = clamp((marketableAtOpen ? (gapFrac > 0.8 ? 0.05 : gapFrac > 0.5 ? 0.02 : 0) : 0) + extraStressReject, 0, 0.35);
   const rand = chance01(`${signal.signal_id}_${candle.closeTime}_maker`);
 
-  if (rand < rejectProb) return { action: 'gtx_reject', reason: 'stress_reject' };
-  if (rand < rejectProb + missProb) return { action: 'miss', reason: 'touch_no_fill' };
-  return { action: 'fill', reason: 'maker_touch_fill' };
+  if (rand < rejectProb) return { action: 'gtx_reject', reason: marketableAtOpen ? 'opened_through_reject' : 'stress_reject' };
+  if (rand < rejectProb + missProb) return { action: 'miss', reason: marketableAtOpen ? 'opened_through_no_fill' : 'touch_no_fill' };
+  return { action: 'fill', reason: marketableAtOpen ? 'opened_through_reprice_fill' : 'maker_touch_fill' };
 }
 
 function fillSignal(signal, candle, candleIdx, cfg, account) {
   const riskUsd = getRiskDollar(account, cfg);
   account.maxRiskUsed = Math.max(account.maxRiskUsed, riskUsd);
-  const qty = riskUsd > 0 ? (riskUsd / signal.sl_distance) : 0;
+  const qtyRaw = (riskUsd > 0 && finiteNum(signal.sl_distance) > 0) ? (riskUsd / signal.sl_distance) : 0;
+  const qty = Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 0;
   const entryIsMaker = cfg.entryMode === 'maker_gtx';
   const entrySlip = entryIsMaker ? 0 : slippageFor('entry', cfg, candle);
   const entryActual = signal.side === 'LONG' ? signal.entry_price + entrySlip : signal.entry_price - entrySlip;
@@ -300,7 +307,7 @@ export function simulateScenario(candles, config) {
 
   const signals = [];
   const warmup = 80;
-  const makerEntryWindowCandles = 2;
+  const makerEntryWindowCandles = Math.max(2, Number(cfg.entryTimeoutCandles || 2));
 
   for (let i = warmup; i < candles.length; i++) {
     const lastClosed = candles[i];
@@ -446,9 +453,9 @@ export function simulateScenario(candles, config) {
   const netR = closedTrades.reduce((s, r) => s + Number(r.pnl_r || 0), 0);
   const avgR = closedTrades.length ? netR / closedTrades.length : 0;
   const winRate = (wins + losses) ? wins / (wins + losses) : 0;
-  const totalFeeUsd = closedTrades.reduce((s, r) => s + Number(r.entry_fee_usd || 0) + Number(r.exit_fee_usd || 0), 0);
-  const totalEntryNotional = closedTrades.reduce((s, r) => s + Number(r.entry_notional_usd || 0), 0);
-  const totalExitNotional = closedTrades.reduce((s, r) => s + Number(r.exit_notional_usd || 0), 0);
+  const totalFeeUsd = closedTrades.reduce((s, r) => s + finiteNum(r.entry_fee_usd) + finiteNum(r.exit_fee_usd), 0);
+  const totalEntryNotional = closedTrades.reduce((s, r) => s + finiteNum(r.entry_notional_usd), 0);
+  const totalExitNotional = closedTrades.reduce((s, r) => s + finiteNum(r.exit_notional_usd), 0);
   const totalTurnoverUsd = totalEntryNotional + totalExitNotional;
   const avgSLSlip = avg(closedTrades.filter(r => r.outcome === 'LOSS').map(r => Number(r.slippage_pts || 0)));
   const avgTPSlip = avg(closedTrades.filter(r => r.outcome === 'WIN').map(r => Number(r.slippage_pts || 0)));
