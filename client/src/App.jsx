@@ -148,7 +148,7 @@ export default function App() {
               <h3 style={{ marginBottom: 10 }}>Engine diagnostics</h3>
               <table className="sim-table">
                 <thead>
-                  <tr><th>Engine</th><th>Raw</th><th>Blocked</th><th>Pending</th><th>Cancelled</th><th>Activated</th><th>Settled</th><th>Wins</th><th>Losses</th><th>Net R</th></tr>
+                  <tr><th>Engine</th><th>Raw</th><th>Blocked</th><th>Pending</th><th>Cancelled</th><th>Activated</th><th>GTX Rej</th><th>Missed</th><th>Settled</th><th>Wins</th><th>Losses</th><th>Net R</th></tr>
                 </thead>
                 <tbody>
                   {Object.entries(result.engineStats).map(([id, s]) => (
@@ -159,6 +159,8 @@ export default function App() {
                       <td>{s.signals}</td>
                       <td>{s.pendingCancelled}</td>
                       <td>{s.activated}</td>
+                      <td>{s.gtxRejected}</td>
+                      <td>{s.timeoutMissed}</td>
                       <td>{s.settled}</td>
                       <td>{s.wins}</td>
                       <td>{s.losses}</td>
@@ -176,6 +178,10 @@ export default function App() {
               <div>Start balance: {fmt(result.summary.startBalance, 2)}</div>
               <div>End balance: {fmt(result.summary.endBalance, 2)}</div>
               <div>Fees deducted: {fmt(result.summary.totalFeeUsd, 2)}</div>
+              <div>Total turnover: {fmt(result.summary.totalTurnoverUsd, 2)}</div>
+              <div>Fee / turnover: {fmt(result.summary.feePctTurnover * 100, 3)}%</div>
+              <div>Avg fee / trade: {fmt(result.summary.avgFeePerTradeUsd, 2)}</div>
+              <div>Avg turnover / trade: {fmt(result.summary.avgTurnoverPerTradeUsd, 2)}</div>
               <div style={{ marginTop: 10, color: 'var(--text3)' }}>Actual config used</div>
               <pre style={{ whiteSpace: 'pre-wrap', fontSize: 11, marginTop: 8 }}>{JSON.stringify(result.actualConfig, null, 2)}</pre>
             </div>
@@ -209,7 +215,7 @@ export default function App() {
             <h3 style={{ marginBottom: 10 }}>Recent trade rows</h3>
             <table className="sim-table">
               <thead>
-                <tr><th>Engine</th><th>Status</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL USD</th><th>PnL R</th><th>Entry fee</th><th>Exit fee</th></tr>
+                <tr><th>Engine</th><th>Status</th><th>Side</th><th>Entry</th><th>Exit</th><th>Gross</th><th>PnL USD</th><th>PnL R</th><th>Entry fee</th><th>Exit fee</th><th>Entry notional</th><th>Exit notional</th></tr>
               </thead>
               <tbody>
                 {topRows.map((r, idx) => (
@@ -219,10 +225,13 @@ export default function App() {
                     <td>{r.side}</td>
                     <td>{fmt(r.entry, 2)}</td>
                     <td>{fmt(r.exitPrice, 2)}</td>
+                    <td>{fmt(r.grossPnlUsd, 2)}</td>
                     <td style={{ color: r.pnlUsd >= 0 ? '#4ade80' : '#f87171' }}>{fmt(r.pnlUsd, 2)}</td>
                     <td>{fmt(r.pnlR, 2)}</td>
                     <td>{fmt(r.entryFeeUsd, 2)}</td>
                     <td>{fmt(r.exitFeeUsd, 2)}</td>
+                    <td>{fmt(r.entryNotionalUsd, 2)}</td>
+                    <td>{fmt(r.exitNotionalUsd, 2)}</td>
                   </tr>
                 ))}
               </tbody>
