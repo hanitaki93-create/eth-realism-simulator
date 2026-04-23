@@ -15,32 +15,62 @@ const INTERVAL_MS = {
   '30m': 1800000, '1h': 3600000, '4h': 14400000, '1d': 86400000
 };
 
-async function fetchPaginated(symbol, interval, totalCandles, startTimeOverride = null) {
+const yearCache = new Map();
+
+function yearRangeUtc(year) {
+  const start = Date.UTC(Number(year), 0, 1, 0, 0, 0, 0);
+  const end = Date.UTC(Number(year) + 1, 0, 1, 0, 0, 0, 0);
+  return { start, end };
+}
+
+async function fetchPaginatedRange(symbol, interval, startTime, endTime) {
   const intervalMs = INTERVAL_MS[interval] || 300000;
-  let startTime = startTimeOverride !== null ? startTimeOverride : Date.now() - totalCandles * intervalMs;
-  let allCandles = [];
-  while (allCandles.length < totalCandles) {
-    const limit = Math.min(MAX_PER_REQUEST, totalCandles - allCandles.length);
-    const url = `${BINANCE_BASE}/klines?symbol=${symbol}&interval=${interval}&startTime=${startTime}&limit=${limit}`;
+  let cursor = startTime;
+  const allCandles = [];
+
+  while (cursor < endTime) {
+    const url = `${BINANCE_BASE}/klines?symbol=${symbol}&interval=${interval}&startTime=${cursor}&endTime=${endTime}&limit=${MAX_PER_REQUEST}`;
     const response = await fetch(url);
     if (!response.ok) throw new Error(`Binance error: ${response.status}`);
     const data = await response.json();
-    if (!data.length) break;
+    if (!Array.isArray(data) || data.length === 0) break;
+
     const candles = data.map(k => ({
-      openTime: k[0], open: Number(k[1]), high: Number(k[2]), low: Number(k[3]), close: Number(k[4]), volume: Number(k[5]), closeTime: k[6]
+      openTime: k[0],
+      open: Number(k[1]),
+      high: Number(k[2]),
+      low: Number(k[3]),
+      close: Number(k[4]),
+      volume: Number(k[5]),
+      closeTime: k[6]
     }));
-    allCandles = allCandles.concat(candles);
-    startTime = candles[candles.length - 1].openTime + intervalMs;
+
+    allCandles.push(...candles);
+
+    const nextCursor = candles[candles.length - 1].openTime + intervalMs;
+    if (nextCursor <= cursor) break;
+    cursor = nextCursor;
   }
-  return allCandles.slice(0, totalCandles);
+
+  return allCandles.filter(c => c.openTime >= startTime && c.openTime < endTime);
 }
 
-app.get('/api/klines', async (req, res) => {
+app.get('/api/klines-year', async (req, res) => {
   try {
-    const { symbol = 'ETHUSDT', interval = '5m', limit = 2000, startTime } = req.query;
-    const totalCandles = Math.min(parseInt(limit, 10), 120000);
-    const candles = await fetchPaginated(symbol, interval, totalCandles, startTime ? parseInt(startTime, 10) : null);
-    res.json({ ok: true, candles, count: candles.length });
+    const { symbol = 'ETHUSDT', interval = '5m', year } = req.query;
+    if (!year) return res.status(400).json({ ok: false, error: 'year is required' });
+
+    const cacheKey = `${symbol}|${interval}|${year}`;
+    if (yearCache.has(cacheKey)) {
+      const candles = yearCache.get(cacheKey);
+      return res.json({ ok: true, candles, count: candles.length, cached: true, year: Number(year) });
+    }
+
+    const { start, end } = yearRangeUtc(year);
+    const candles = await fetchPaginatedRange(symbol, interval, start, end);
+    yearCache.set(cacheKey, candles);
+
+    res.json({ ok: true, candles, count: candles.length, cached: false, year: Number(year) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
