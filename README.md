@@ -1,19 +1,36 @@
-[README_PATCH.md](https://github.com/user-attachments/files/27064112/README_PATCH.md)
-# ETH simulator control-truth patch
+[README_PATCH.md](https://github.com/user-attachments/files/27065568/README_PATCH.md)
+# ETH simulator final tonight fix
 
-Replace these files in your GitHub repo:
+Replace these files in GitHub:
 
 - client/src/simulatorCore.js
 - client/src/App.jsx
 - client/src/components/ScenarioForm.jsx
 
-Patch purpose:
-- TP RR is fully wired into execution TP.
-- Maker GTX entry requires actual touch before fill probability is applied.
-- TP mode supports market/taker, maker limit, and maker then taker fallback.
-- Slippage controls are mutually exclusive: manual, preset, or dynamic.
-- Disabled UI controls are intentionally inactive to avoid fake/contradictory toggles.
-- Logs include gross R, fee R, net R, raw TP vs execution TP, notional, fill reason, TP exit mode, fee types, slippage used.
-- Summary includes fee R, median fee R, SL distance, notional, TP maker/taker/fallback counts, missed-no-touch and missed-probability counts.
+Main changes:
 
-After pushing to GitHub, pull and rebuild on VPS.
+- Adds GTX Fill Style control:
+  - neutral_prob = default main research mode; applies A/B/C/custom fill probability neutrally after signal activation, preventing the no-touch filter from selecting mostly losers.
+  - hybrid = immediate neutral fill attempt first, then touch-gated retry.
+  - touch_gated = strict old stress-test behavior only.
+- Changes TP default to maker_limit with tpMakerFillProb 0.995.
+- Keeps TP maker/taker/fallback controls functional.
+- Keeps fee and slippage controls functional.
+- Adds GTX style to output config/log context.
+
+Recommended default for main tests:
+
+- Entry Mode: Maker GTX
+- GTX Fill Style: Neutral probability
+- Execution Model: B, Fill Prob 0.88
+- TP Mode: TP Maker Limit
+- TP Maker Fill Prob: 0.995 or 1.00
+- TP Fallback Candles: disabled/off unless using Maker then Taker mode
+- SL exit remains taker
+- Slippage: Dynamic candle / realistic base
+
+VPS after GitHub commit:
+
+cd /root/eth-realism-simulator && git pull && cd client && npm run build && cd .. && pm2 restart all
+
+Build tested locally: npm run build passed.
