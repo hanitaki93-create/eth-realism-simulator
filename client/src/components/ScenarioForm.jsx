@@ -46,6 +46,14 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
           </select>
         </label>
 
+        <label>Entry Mode
+          <select value={config.entryMode} onChange={e=>set('entryMode', e.target.value)}>
+            <option value="maker_gtx">Maker GTX only</option>
+            <option value="taker">Taker only</option>
+            <option value="maker_taker_fallback">Maker GTX → taker fallback</option>
+          </select>
+        </label>
+
         <label>Execution Model
           <select value={config.executionModel} onChange={e=>set('executionModel', e.target.value)}>
             <option value="A">A — Optimistic</option>
@@ -54,11 +62,8 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
           </select>
         </label>
 
-        <label>TP Mode
-          <select value={config.tpMode} onChange={e=>set('tpMode', e.target.value)}>
-            <option value="market">Market</option>
-            <option value="limit">Limit</option>
-          </select>
+        <label>Exit Mode
+          <input value="TP/SL always taker" disabled />
         </label>
 
         <label>TP RR<input type="number" step="0.1" value={config.tpRMultiple} onChange={e=>set('tpRMultiple', +e.target.value)} /></label>
@@ -68,6 +73,14 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
 
         <label>Maker Fee bps<input type="number" step="0.1" value={config.feeMakerBps} onChange={e=>set('feeMakerBps', +e.target.value)} /></label>
         <label>Taker Fee bps<input type="number" step="0.1" value={config.feeTakerBps} onChange={e=>set('feeTakerBps', +e.target.value)} /></label>
+
+        <label>Slippage Model
+          <select value={config.slippageModel} onChange={e=>set('slippageModel', e.target.value)}>
+            <option value="fixed">Fixed preset</option>
+            <option value="dynamic">Candle dynamic</option>
+            <option value="stress">Dynamic stress</option>
+          </select>
+        </label>
 
         <label>Slip Preset
           <select value={config.slippagePreset} onChange={e=>set('slippagePreset', e.target.value)}>
