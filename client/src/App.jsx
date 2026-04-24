@@ -13,12 +13,31 @@ function candleCountForYear(year, interval) {
   return Math.floor((end - start) / ms);
 }
 
+async function fetchJson(url) {
+  const resp = await fetch(url, { method: 'GET' });
+  const contentType = resp.headers.get('content-type') || '';
+  const text = await resp.text();
+
+  if (!resp.ok) {
+    throw new Error(`HTTP ${resp.status}: ${text.slice(0, 200)}`);
+  }
+
+  if (!contentType.includes('application/json')) {
+    throw new Error(`Expected JSON from ${url} but got ${contentType || 'unknown'}: ${text.slice(0, 120)}`);
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error(`Invalid JSON from ${url}: ${text.slice(0, 120)}`);
+  }
+}
+
 async function fetchYearCandles(symbol, interval, year) {
   const startTime = Date.UTC(year, 0, 1, 0, 0, 0);
   const limit = candleCountForYear(year, interval);
   const url = `${API_BASE}/api/klines?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&limit=${limit}&startTime=${startTime}`;
-  const resp = await fetch(url);
-  const json = await resp.json();
+  const json = await fetchJson(url);
   if (!json.ok) throw new Error(json.error || `Failed to fetch ${year}`);
   return { year, candles: json.candles || [], chunks: Math.ceil((json.candles?.length || 0) / 1000) };
 }
@@ -52,7 +71,7 @@ export default function App() {
 
       const sim = simulateScenario(merged, { ...config, startingBalance: config.startingBalance });
       setResult(sim);
-      setStatus(`Simulation complete. ${sim.summary.trades.toLocaleString()} closed trades across ${years.join(', ')}.`);
+      setStatus(`Simulation complete. ${sim.summary.filledTrades.toLocaleString()} filled trades across ${years.join(', ')}.`);
     } catch (e) {
       setStatus(`Error: ${e.message}`);
     } finally {
