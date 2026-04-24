@@ -24,6 +24,7 @@ export const DEFAULT_CONFIG = {
   // Signal/execution
   tpRMultiple: 2,
   entryMode: 'maker_gtx', // maker_gtx | taker_market
+  makerEntryFillStyle: 'neutral_prob', // neutral_prob | touch_gated | hybrid
   executionModel: 'B', // A | B | C | custom
   fillProbA: 1.0,
   fillProbB: 0.88,
@@ -35,8 +36,8 @@ export const DEFAULT_CONFIG = {
   randomSeed: 42,
 
   // TP exit behavior
-  tpMode: 'market', // market | maker_limit | maker_then_market
-  tpMakerFillProb: 0.95,
+  tpMode: 'maker_limit', // market | maker_limit | maker_then_market
+  tpMakerFillProb: 0.995,
   tpFallbackCandles: 0,
 
   // Fees
@@ -96,6 +97,7 @@ function normalizeConfig(config = {}) {
   if (config.slippageBasePts && !config.slippageManualPts) merged.slippageManualPts = { ...DEFAULT_CONFIG.slippageManualPts, ...config.slippageBasePts };
   if (config.slippageBasePts && !config.slippageDynamicBasePts) merged.slippageDynamicBasePts = { ...DEFAULT_CONFIG.slippageDynamicBasePts, ...config.slippageBasePts };
   if (config.tpMode === 'limit') merged.tpMode = 'maker_limit';
+  if (!['neutral_prob', 'touch_gated', 'hybrid'].includes(merged.makerEntryFillStyle)) merged.makerEntryFillStyle = DEFAULT_CONFIG.makerEntryFillStyle;
 
   merged.tpRMultiple = Math.max(0.1, Number(merged.tpRMultiple) || DEFAULT_CONFIG.tpRMultiple);
   merged.entryTimeoutCandles = Math.max(0, Math.floor(Number(merged.entryTimeoutCandles) || 0));
@@ -316,15 +318,41 @@ function fillProbabilityForTouch(signal, candle, cfg) {
 }
 
 function tryFillEntry(signal, candles, cfg, rand) {
-  if (cfg.entryMode === 'taker_market') {
-    const idx = Math.min(candles.length - 1, signal.activeFromIdx);
-    return { filled: true, fillIdx: idx, fillProb: 1, touchedEntry: true, entryFillReason: 'TAKER_MARKET' };
-  }
-
   const start = Math.min(candles.length - 1, signal.activeFromIdx);
   const end = Math.min(candles.length - 1, start + cfg.makerEntryTimeoutCandles);
+  const baseProb = baseEntryFillProbability(cfg);
+
+  if (cfg.entryMode === 'taker_market') {
+    return { filled: true, fillIdx: start, fillProb: 1, touchedEntry: true, entryFillReason: 'TAKER_MARKET', makerEntryFillStyle: 'taker' };
+  }
+
+  // 70/95 default: neutral probabilistic GTX.
+  // Reason: available OHLC candles cannot observe queue position or bid/ask posting. A strict
+  // no-touch gate created severe selection bias by missing mostly winner signals. Neutral mode
+  // tests execution drag without allowing execution to choose winners/losers by candle path.
+  if (cfg.makerEntryFillStyle === 'neutral_prob') {
+    const filled = rand() <= baseProb;
+    return {
+      filled,
+      fillIdx: filled ? start : null,
+      fillProb: baseProb,
+      touchedEntry: true,
+      entryFillReason: filled ? 'MAKER_NEUTRAL_FILLED' : 'MAKER_NEUTRAL_MISSED',
+      makerEntryFillStyle: cfg.makerEntryFillStyle,
+    };
+  }
+
+  // Hybrid: first allow near-immediate maker posting fill using the neutral probability;
+  // only if it fails do we look for a touch within timeout. This is less biased than strict touch.
+  if (cfg.makerEntryFillStyle === 'hybrid') {
+    if (rand() <= baseProb) {
+      return { filled: true, fillIdx: start, fillProb: baseProb, touchedEntry: true, entryFillReason: 'MAKER_HYBRID_IMMEDIATE_FILLED', makerEntryFillStyle: cfg.makerEntryFillStyle };
+    }
+  }
+
+  // Strict touch-gated GTX is retained only as a stress/audit option.
   let touched = false;
-  let lastFillProb = baseEntryFillProbability(cfg);
+  let lastFillProb = baseProb;
 
   for (let i = start; i <= end; i++) {
     const c = candles[i];
@@ -332,16 +360,18 @@ function tryFillEntry(signal, candles, cfg, rand) {
     touched = true;
     lastFillProb = fillProbabilityForTouch(signal, c, cfg);
     if (rand() <= lastFillProb) {
-      return { filled: true, fillIdx: i, fillProb: lastFillProb, touchedEntry: true, entryFillReason: 'MAKER_TOUCH_FILLED' };
+      return { filled: true, fillIdx: i, fillProb: lastFillProb, touchedEntry: true, entryFillReason: cfg.makerEntryFillStyle === 'hybrid' ? 'MAKER_HYBRID_TOUCH_FILLED' : 'MAKER_TOUCH_FILLED', makerEntryFillStyle: cfg.makerEntryFillStyle };
     }
   }
 
+  const reason = touched ? 'MAKER_TOUCH_NOT_FILLED' : 'MAKER_NO_TOUCH';
   return {
     filled: false,
     fillIdx: null,
     fillProb: lastFillProb,
     touchedEntry: touched,
-    entryFillReason: touched ? 'MAKER_TOUCH_NOT_FILLED' : 'MAKER_NO_TOUCH',
+    entryFillReason: cfg.makerEntryFillStyle === 'hybrid' ? `MAKER_HYBRID_${reason}` : reason,
+    makerEntryFillStyle: cfg.makerEntryFillStyle,
   };
 }
 
@@ -478,6 +508,7 @@ function passTwoExecution(signals, candles, cfg) {
       tpSlip: fmtNum(exit.tpSlip, 4),
       slSlip: fmtNum(exit.slSlip, 4),
       fillProb: fmtNum(entryAttempt.fillProb, 4),
+      makerEntryFillStyle: entryAttempt.makerEntryFillStyle || cfg.makerEntryFillStyle,
       touchedEntry: entryAttempt.touchedEntry,
       entryFillReason: entryAttempt.entryFillReason,
       entryFeeType: entryMaker ? 'maker' : 'taker',
@@ -526,8 +557,8 @@ function summarizeByEngine(cfg, pass1, pass2) {
     const s = engineStats[m.engine];
     if (!s) continue;
     s.missed += 1;
-    if (m.missedReason === 'MAKER_NO_TOUCH') s.missedNoTouch += 1;
-    if (m.missedReason === 'MAKER_TOUCH_NOT_FILLED') s.missedProb += 1;
+    if ((m.missedReason || '').includes('NO_TOUCH')) s.missedNoTouch += 1;
+    if ((m.missedReason || '').includes('NOT_FILLED') || (m.missedReason || '').includes('NEUTRAL_MISSED')) s.missedProb += 1;
   }
 
   for (const s of Object.values(engineStats)) {
@@ -563,8 +594,8 @@ export function simulateScenario(candles, config) {
   const tpMakerCount = results.filter(t => t.status === 'TP' && t.exitFeeType === 'maker').length;
   const tpTakerCount = results.filter(t => t.status === 'TP' && t.exitFeeType === 'taker').length;
   const tpFallbackCount = results.filter(t => t.tpFallbackUsed).length;
-  const missedNoTouch = pass2.missed.filter(m => m.missedReason === 'MAKER_NO_TOUCH').length;
-  const missedProb = pass2.missed.filter(m => m.missedReason === 'MAKER_TOUCH_NOT_FILLED').length;
+  const missedNoTouch = pass2.missed.filter(m => (m.missedReason || '').includes('NO_TOUCH')).length;
+  const missedProb = pass2.missed.filter(m => (m.missedReason || '').includes('NOT_FILLED') || (m.missedReason || '').includes('NEUTRAL_MISSED')).length;
 
   const feeRSamples = results.map(t => t.feeR);
   const slSamples = results.map(t => t.slDistance);
