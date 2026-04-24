@@ -26,10 +26,12 @@ export const DEFAULT_CONFIG = {
   tpRMultiple: 2,
   slMultiplier: 1,
   minSlFloor: 0,
-  entryMode: 'maker_gtx', // kept for UI compatibility; core execution now probabilistic
-  executionModel: 'B',    // A | B | C
+  entryMode: 'maker_gtx', // maker_gtx | taker | maker_taker_fallback
+  executionModel: 'B',    // A | B | C, used for maker fill probability
   fillProbOverride: null, // optional numeric override
   entryOffset: 0,
+  slippageModel: 'dynamic', // fixed | dynamic | stress
+  takerFallbackDelayCandles: 1,
   entryTimeoutCandles: 2,
   makerEntryRejectRate: 0,          // ignored in core two-pass model; kept for UI compatibility
   makerEntryMissAfterTouchRate: 0,  // ignored in core two-pass model; kept for UI compatibility
@@ -101,13 +103,35 @@ function finalizeCompounding(balanceState) {
   if (balanceState.pendingPnl) balanceState.balance += balanceState.pendingPnl;
 }
 
+
 function slippageFor(type, cfg, candle) {
-  const base = Number(cfg.slippageBasePts?.[type] ?? 0);
   const range = Math.abs((candle?.high ?? 0) - (candle?.low ?? 0));
-  const presetMult = cfg.slippagePreset === 'baseline' ? 0.6 : cfg.slippagePreset === 'stress' ? 1.8 : 1;
-  const volatilityBump = range > 15 ? 1.5 : range > 8 ? 1.2 : 1;
-  return +(base * presetMult * volatilityBump).toFixed(4);
+  const body = Math.abs((candle?.close ?? 0) - (candle?.open ?? 0));
+  const rangePct = candle?.open ? range / candle.open : 0;
+  const bodyPct = candle?.open ? body / candle.open : 0;
+
+  if (cfg.slippageModel === 'fixed') {
+    const base = Number(cfg.slippageBasePts?.[type] ?? 0);
+    const presetMult = cfg.slippagePreset === 'baseline' ? 0.6 : cfg.slippagePreset === 'stress' ? 1.8 : 1;
+    return +(base * presetMult).toFixed(4);
+  }
+
+  const normalBase = type === 'entry' ? 0.08 : type === 'tp' ? 0.15 : 0.26;
+  let slip = normalBase;
+
+  if (rangePct > 0.012) slip += range * 0.035;
+  else if (rangePct > 0.006) slip += range * 0.020;
+  else if (rangePct > 0.003) slip += range * 0.010;
+
+  if (bodyPct > 0.006) slip += range * 0.010;
+  if (type === 'sl') slip *= 1.25;
+  if (type === 'tp') slip *= 0.85;
+  if (cfg.slippageModel === 'stress' || cfg.slippagePreset === 'stress') slip *= 1.6;
+  if (cfg.slippagePreset === 'baseline') slip *= 0.65;
+
+  return +clamp(slip, 0, type === 'sl' ? 5 : 3).toFixed(4);
 }
+
 
 function feeUsd(notional, bps) {
   return Math.abs(notional) * (bps / 10000);
@@ -236,6 +260,9 @@ function collectSignalLedger(candles, cfg, enabledEngineIds) {
       timeoutMissed: 0,
       missedWinners: 0,
       missedLosers: 0,
+      makerFilled: 0,
+      takerFilled: 0,
+      fallbackUsed: 0,
     }])
   );
 
@@ -296,32 +323,36 @@ function collectSignalLedger(candles, cfg, enabledEngineIds) {
   return { ledger, engineStats };
 }
 
-function buildTradeFromSettledSignal(signal, candles, cfg, riskUsd) {
+
+function buildTradeFromSettledSignal(signal, candles, cfg, riskUsd, execution) {
   const qty = riskUsd / signal.slDistance;
-  const entry = signal.entry;
+  let entry = signal.entry;
+  const entryCandle = candles[signal.activatedAtIdx] || candles[signal.signalIdx] || signal.outcomeCandle;
+  const entryIsMaker = execution.entryType === 'maker';
+  const entrySlippagePts = entryIsMaker ? 0 : slippageFor('entry', cfg, entryCandle);
+  if (!entryIsMaker) {
+    entry = signal.side === 'LONG' ? signal.entry + entrySlippagePts : signal.entry - entrySlippagePts;
+  }
+
   const entryNotional = Math.abs(entry * qty);
 
+  // Exits are always taker. TP maker/fallback was intentionally removed after live Binance constraints.
   let exitPrice = signal.outcome === 'TP' ? signal.tp : signal.outcome === 'SL'
     ? signal.sl
     : Number(signal.outcomeCandle?.close ?? entry);
 
   let slippagePts = 0;
-  let exitIsMaker = false;
   if (signal.outcome === 'TP') {
-    if (cfg.tpMode === 'limit' && Math.random() >= cfg.tpFailRate) {
-      exitIsMaker = true;
-    } else {
-      slippagePts = slippageFor('tp', cfg, signal.outcomeCandle);
-      exitPrice = signal.side === 'LONG' ? signal.tp - slippagePts : signal.tp + slippagePts;
-    }
+    slippagePts = slippageFor('tp', cfg, signal.outcomeCandle);
+    exitPrice = signal.side === 'LONG' ? signal.tp - slippagePts : signal.tp + slippagePts;
   } else if (signal.outcome === 'SL') {
     slippagePts = slippageFor('sl', cfg, signal.outcomeCandle);
     exitPrice = signal.side === 'LONG' ? signal.sl - slippagePts : signal.sl + slippagePts;
   }
 
-  const entryFeeUsd = feeUsd(entryNotional, cfg.feeMakerBps);
+  const entryFeeUsd = feeUsd(entryNotional, entryIsMaker ? cfg.feeMakerBps : cfg.feeTakerBps);
   const exitNotional = Math.abs(exitPrice * qty);
-  const exitFeeUsd = feeUsd(exitNotional, exitIsMaker ? cfg.feeMakerBps : cfg.feeTakerBps);
+  const exitFeeUsd = feeUsd(exitNotional, cfg.feeTakerBps);
 
   const grossPnl = sideSign(signal.side) * (exitPrice - entry) * qty;
   const pnlUsd = grossPnl - entryFeeUsd - exitFeeUsd;
@@ -331,16 +362,18 @@ function buildTradeFromSettledSignal(signal, candles, cfg, riskUsd) {
     engine: signal.engine,
     status: signal.outcome,
     signalTime: signal.signalTime,
-    entryTime: candles[signal.activatedAtIdx]?.openTime ?? signal.signalTime,
+    entryTime: entryCandle?.openTime ?? signal.signalTime,
     exitTime: signal.outcomeCandle?.closeTime ?? signal.signalTime,
     side: signal.side,
     entry,
+    intendedEntry: signal.entry,
     sl: signal.sl,
     tp: signal.tp,
     exitPrice,
     qty,
-    entryMaker: true,
-    tpMode: cfg.tpMode,
+    entryMaker: entryIsMaker,
+    entryType: execution.entryType,
+    fallbackUsed: execution.fallbackUsed,
     grossPnl,
     pnlUsd,
     pnlR,
@@ -349,10 +382,29 @@ function buildTradeFromSettledSignal(signal, candles, cfg, riskUsd) {
     entryNotional,
     exitNotional,
     turnoverUsd: entryNotional + exitNotional,
+    entrySlippagePts,
     slippagePts,
     expectedPnlR: finiteNum(signal.expectedPnlR, 0),
   };
 }
+
+function decideEntryExecution(signal, cfg) {
+  const fillProb = resolveFillProbability(cfg);
+  const u = hashUnit(`${cfg.executionModel}|${cfg.entryMode}|${signal.engine}|${signal.signalTime}|${signal.side}|${signal.signalIdx}`);
+
+  if (cfg.entryMode === 'taker') {
+    return { filled: true, entryType: 'taker', fallbackUsed: false, missed: false, fillProb: 1 };
+  }
+
+  if (cfg.entryMode === 'maker_taker_fallback') {
+    if (u <= fillProb) return { filled: true, entryType: 'maker', fallbackUsed: false, missed: false, fillProb };
+    return { filled: true, entryType: 'taker', fallbackUsed: true, missed: false, fillProb };
+  }
+
+  if (u <= fillProb) return { filled: true, entryType: 'maker', fallbackUsed: false, missed: false, fillProb };
+  return { filled: false, entryType: 'none', fallbackUsed: false, missed: true, fillProb };
+}
+
 
 function runExecutionOverlay(ledger, candles, cfg, engineStatsBase) {
   const stats = deepClone(engineStatsBase);
@@ -368,9 +420,9 @@ function runExecutionOverlay(ledger, candles, cfg, engineStatsBase) {
   };
 
   for (const signal of settledSignals.sort((a, b) => a.signalIdx - b.signalIdx)) {
-    const u = hashUnit(`${cfg.executionModel}|${signal.engine}|${signal.signalTime}|${signal.side}|${signal.signalIdx}`);
-    const fills = u <= fillProb;
-    if (!fills) {
+    const execution = decideEntryExecution(signal, cfg);
+
+    if (!execution.filled) {
       missedSignals.push(signal);
       stats[signal.engine].missed += 1;
       if (finiteNum(signal.expectedPnlR, 0) > 0) stats[signal.engine].missedWinners += 1;
@@ -382,10 +434,12 @@ function runExecutionOverlay(ledger, candles, cfg, engineStatsBase) {
     const riskUsd = getRiskDollar(balanceState.balance, cfg);
     balanceState.maxRiskUsed = Math.max(balanceState.maxRiskUsed, riskUsd);
 
-    const trade = buildTradeFromSettledSignal(signal, candles, cfg, riskUsd);
+    const trade = buildTradeFromSettledSignal(signal, candles, cfg, riskUsd, execution);
     results.push(trade);
     stats[signal.engine].filled += 1;
-    stats[signal.engine].settled += 0; // already counted in pass1
+    if (trade.entryType === 'maker') stats[signal.engine].makerFilled += 1;
+    if (trade.entryType === 'taker') stats[signal.engine].takerFilled += 1;
+    if (trade.fallbackUsed) stats[signal.engine].fallbackUsed += 1;
 
     if (trade.status === 'TP') stats[signal.engine].wins += 1;
     else if (trade.status === 'SL') stats[signal.engine].losses += 1;
@@ -412,6 +466,10 @@ function summarize(signals, results, missedSignals, engineStats, balanceState, c
   const feeToTurnover = totalTurnover > 0 ? totalFeeUsd / totalTurnover : 0;
   const avgSLSlip = avg(closedTrades.filter(r => r.status === 'SL').map(r => r.slippagePts));
   const avgTPSlip = avg(closedTrades.filter(r => r.status === 'TP').map(r => r.slippagePts));
+  const avgEntrySlip = avg(closedTrades.filter(r => !r.entryMaker).map(r => r.entrySlippagePts));
+  const makerFilled = closedTrades.filter(r => r.entryType === 'maker').length;
+  const takerFilled = closedTrades.filter(r => r.entryType === 'taker').length;
+  const fallbackUsed = closedTrades.filter(r => r.fallbackUsed).length;
   const netR = closedTrades.reduce((s, r) => s + r.pnlR, 0);
   const avgR = closedTrades.length ? netR / closedTrades.length : 0;
   const pWinSignal = signals.length ? signals.filter(s => finiteNum(s.expectedPnlR, 0) > 0).length / signals.length : 0;
@@ -445,6 +503,11 @@ function summarize(signals, results, missedSignals, engineStats, balanceState, c
     avgTurnoverPerTrade,
     avgSLSlip,
     avgTPSlip,
+    avgEntrySlip,
+    makerFilled,
+    takerFilled,
+    fallbackUsed,
+    entryMode: cfg.entryMode,
     executionModel: cfg.executionModel,
     fillProb,
     maxRiskUsed: balanceState.maxRiskUsed,
