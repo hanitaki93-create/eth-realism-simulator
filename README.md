@@ -1,55 +1,19 @@
-# ETH Binance Realism Simulator (MVP)
+[README_PATCH.md](https://github.com/user-attachments/files/27064112/README_PATCH.md)
+# ETH simulator control-truth patch
 
-This is a separate simulator project built from the V5 baseline repo.
+Replace these files in your GitHub repo:
 
-## What it does in this MVP
-- Replays ETH historical candles from Binance spot API
-- Runs baseline engines from the V5 client codebase
-- Simulates a realistic execution layer with:
-  - wick-touch TP/SL settlement
-  - maker GTX/post-only entry mode
-  - market/taker entry mode
-  - maker or taker TP mode
-  - taker SL mode
-  - configurable rejection/miss logic
-  - maker/taker fees
-  - configurable slippage presets
-  - flat R or % of account with R hard cap
-  - compounding cadence: none/per_trade/daily/monthly/quarterly
-- Produces scenario stats and per-engine breakdown
+- client/src/simulatorCore.js
+- client/src/App.jsx
+- client/src/components/ScenarioForm.jsx
 
-## Quick local start
-```bash
-npm run install:all
-npm run dev
-```
+Patch purpose:
+- TP RR is fully wired into execution TP.
+- Maker GTX entry requires actual touch before fill probability is applied.
+- TP mode supports market/taker, maker limit, and maker then taker fallback.
+- Slippage controls are mutually exclusive: manual, preset, or dynamic.
+- Disabled UI controls are intentionally inactive to avoid fake/contradictory toggles.
+- Logs include gross R, fee R, net R, raw TP vs execution TP, notional, fill reason, TP exit mode, fee types, slippage used.
+- Summary includes fee R, median fee R, SL distance, notional, TP maker/taker/fallback counts, missed-no-touch and missed-probability counts.
 
-## New GitHub repo
-```bash
-git init
-git branch -M main
-git add .
-git commit -m "Initial realism simulator MVP"
-git remote add origin <YOUR_NEW_REPO_URL>
-git push -u origin main
-```
-
-## New DigitalOcean droplet (Ubuntu)
-```bash
-sudo apt update && sudo apt upgrade -y
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs git
-sudo npm i -g pm2
-
-git clone <YOUR_NEW_REPO_URL> eth-realism-simulator
-cd eth-realism-simulator
-npm run install:all
-cd client && npm run build && cd ..
-pm2 start server/index.js --name eth-realism-sim
-pm2 save
-pm2 startup
-```
-
-## Notes
-- This MVP intentionally keeps execution modeling explicit and adjustable.
-- It is designed for decision-quality realism, not exchange-perfect replay.
+After pushing to GitHub, pull and rebuild on VPS.
