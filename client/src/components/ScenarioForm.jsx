@@ -27,6 +27,7 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
   const manualActive = slippageMode === 'manual';
   const dynamicActive = slippageMode === 'dynamic';
   const makerEntryActive = entryMode === 'maker_gtx';
+  const entryTouchTimeoutActive = makerEntryActive && (config.makerEntryFillStyle === 'touch_gated' || config.makerEntryFillStyle === 'hybrid');
   const tpMakerActive = tpMode === 'maker_limit' || tpMode === 'maker_then_market';
   const tpFallbackActive = tpMode === 'maker_then_market';
   const fillModelActive = makerEntryActive;
@@ -101,8 +102,16 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
         <label style={fillModelActive && config.executionModel === 'C' ? {} : disabledStyle}>C Fill Prob<NumInput step="0.01" disabled={!fillModelActive || config.executionModel !== 'C'} value={config.fillProbC} onChange={v=>set('fillProbC', v)} /></label>
         <label style={fillModelActive && config.executionModel === 'custom' ? {} : disabledStyle}>Custom Fill Prob<NumInput step="0.01" disabled={!fillModelActive || config.executionModel !== 'custom'} value={config.fillProbOverride ?? 0.88} onChange={v=>set('fillProbOverride', v)} /></label>
 
+        <label style={makerEntryActive ? {} : disabledStyle}>GTX Fill Style
+          <select style={inputStyle} disabled={!makerEntryActive} value={config.makerEntryFillStyle || 'neutral_prob'} onChange={e=>set('makerEntryFillStyle', e.target.value)}>
+            <option value="neutral_prob">Neutral probability</option>
+            <option value="hybrid">Hybrid immediate + touch</option>
+            <option value="touch_gated">Strict touch-gated</option>
+          </select>
+        </label>
+
         <label>Pending Confirm Candles<NumInput value={config.entryTimeoutCandles} onChange={v=>set('entryTimeoutCandles', v)} /></label>
-        <label style={makerEntryActive ? {} : disabledStyle}>Maker Entry Timeout<NumInput disabled={!makerEntryActive} value={config.makerEntryTimeoutCandles} onChange={v=>set('makerEntryTimeoutCandles', v)} /></label>
+        <label style={entryTouchTimeoutActive ? {} : disabledStyle}>Maker Entry Timeout<NumInput disabled={!entryTouchTimeoutActive} value={config.makerEntryTimeoutCandles} onChange={v=>set('makerEntryTimeoutCandles', v)} /></label>
         <label>Max Hold Candles<NumInput value={config.maxHoldCandles} onChange={v=>set('maxHoldCandles', v)} /></label>
         <label>Random Seed<NumInput value={config.randomSeed} onChange={v=>set('randomSeed', v)} /></label>
 
