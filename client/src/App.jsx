@@ -131,7 +131,7 @@ export default function App() {
         <>
           <div className="card" style={{ marginBottom: 16 }}>
             <b>Run complete.</b> {result.summary.trades.toLocaleString()} filled trades across {result.yearsRun.join(', ')}.<br />
-            Loaded candles: {result.loadedCandles.toLocaleString()} | Entry: {result.actualConfig.entryMode} | TP mode: {result.actualConfig.tpMode} | Slippage: {result.actualConfig.slippageMode}<br />
+            Loaded candles: {result.loadedCandles.toLocaleString()} | Entry: {result.actualConfig.entryMode} | GTX style: {result.actualConfig.makerEntryFillStyle || 'n/a'} | TP mode: {result.actualConfig.tpMode} | Slippage: {result.actualConfig.slippageMode}<br />
             TP RR: {fmt(result.actualConfig.tpRMultiple, 2)} | Max R used: {fmt(result.summary.maxRiskUsed, 2)} | Seed: {result.actualConfig.randomSeed}
           </div>
 
