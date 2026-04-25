@@ -21,6 +21,42 @@ function downloadJson(filename, data) {
   URL.revokeObjectURL(url);
 }
 
+function makeRunId(config, years) {
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const dMode = config.engineEntryMode?.D || config.entryMode;
+  const eMode = config.engineEntryMode?.E || config.entryMode;
+  const dGtx = config.engineMakerEntryFillStyle?.D || config.makerEntryFillStyle;
+  const eGtx = config.engineMakerEntryFillStyle?.E || config.makerEntryFillStyle;
+  return `${ts}__Y${years.join('-')}__D-${dMode}-${dGtx}__E-${eMode}-${eGtx}__TP-${config.tpMode}__RR-${config.tpRMultiple}`.replace(/[^A-Za-z0-9_.-]+/g, '_');
+}
+
+function modeSummary(config) {
+  return {
+    years: config.selectedYears,
+    riskMode: config.riskMode,
+    fixedRisk: config.fixedRisk,
+    riskPct: config.riskPct,
+    riskCap: config.riskCap,
+    compounding: config.compounding,
+    tpRMultiple: config.tpRMultiple,
+    dEntryMode: config.engineEntryMode?.D || config.entryMode,
+    dGtxModel: config.engineMakerEntryFillStyle?.D || config.makerEntryFillStyle,
+    eEntryMode: config.engineEntryMode?.E || config.entryMode,
+    eGtxModel: config.engineMakerEntryFillStyle?.E || config.makerEntryFillStyle,
+    executionModel: config.executionModel,
+    tpMode: config.tpMode,
+    tpMakerFillProb: config.tpMakerFillProb,
+    tpFallbackCandles: config.tpFallbackCandles,
+    tpFallbackSeconds: config.tpFallbackSeconds,
+    makerFeeBps: config.feeMakerBps,
+    takerFeeBps: config.feeTakerBps,
+    slippageMode: config.slippageMode,
+    slippagePreset: config.slippagePreset,
+    randomSeed: config.randomSeed,
+    engines: config.engines,
+  };
+}
+
 function StatCard({ label, value, dec = 2 }) {
   return (
     <div className="card">
@@ -33,6 +69,7 @@ function StatCard({ label, value, dec = 2 }) {
 export default function App() {
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [result, setResult] = useState(null);
+  const [runHistory, setRunHistory] = useState([]);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState('Ready.');
 
@@ -74,8 +111,28 @@ export default function App() {
       }
 
       const allCandles = yearly.flatMap(y => y.candles);
-      setStatus(`Loaded ${allCandles.length.toLocaleString()} candles. Running simulation…`);
-      const sim = simulateScenario(allCandles, config);
+      const runId = makeRunId(config, years);
+      const runMeta = {
+        runId,
+        runTimestamp: new Date().toISOString(),
+        selectedYears: years,
+        modeSummary: modeSummary({ ...config, selectedYears: years }),
+        actualConfigAtRunStart: JSON.parse(JSON.stringify({ ...config, selectedYears: years })),
+      };
+      const candleYearAtIndex = (idx) => {
+        const ts = allCandles[idx]?.closeTime ?? allCandles[idx]?.openTime ?? 0;
+        if (!ts) return null;
+        return new Date(ts).getUTCFullYear();
+      };
+      setStatus(`Loaded ${allCandles.length.toLocaleString()} candles. Running simulation ${runId}…`);
+      const simRaw = simulateScenario(allCandles, { ...config, selectedYears: years });
+      const sim = {
+        ...simRaw,
+        results: simRaw.results.map(r => ({ ...r, runId, runTimestamp: runMeta.runTimestamp, testYears: years.join(','), sourceYear: candleYearAtIndex(r.settleIdx), modeSummary: runMeta.modeSummary })),
+        missedSignals: simRaw.missedSignals.map(r => ({ ...r, runId, runTimestamp: runMeta.runTimestamp, testYears: years.join(','), sourceYear: candleYearAtIndex(r.signalIdx), modeSummary: runMeta.modeSummary })),
+        signalLedger: simRaw.signalLedger.map(r => ({ ...r, runId, runTimestamp: runMeta.runTimestamp, testYears: years.join(','), sourceYear: candleYearAtIndex(r.signalIdx), modeSummary: runMeta.modeSummary })),
+        runMeta,
+      };
 
       const yearByYear = yearly.map(({ year, candles, chunks }) => {
         const start = candles[0]?.openTime ?? 0;
@@ -111,8 +168,21 @@ export default function App() {
         };
       });
 
-      setResult({ ...sim, yearsRun: years, loadedCandles: allCandles.length, yearByYear });
-      setStatus(`Simulation complete. ${sim.summary.trades.toLocaleString()} filled trades across ${years.join(', ')}.`);
+      const nextResult = { ...sim, yearsRun: years, loadedCandles: allCandles.length, yearByYear, runMeta };
+      setResult(nextResult);
+      setRunHistory(prev => [
+        {
+          runId,
+          runTimestamp: runMeta.runTimestamp,
+          selectedYears: years,
+          modeSummary: runMeta.modeSummary,
+          summary: sim.summary,
+          engineStats: sim.engineStats,
+          yearByYear,
+        },
+        ...prev,
+      ].slice(0, 50));
+      setStatus(`Simulation complete. ${sim.summary.trades.toLocaleString()} filled trades across ${years.join(', ')}. Run ID: ${runId}`);
     } catch (e) {
       setStatus(`Error: ${e.message}`);
     } finally {
@@ -130,8 +200,8 @@ export default function App() {
       {result && (
         <>
           <div className="card" style={{ marginBottom: 16 }}>
-            <b>Run complete.</b> {result.summary.trades.toLocaleString()} filled trades across {result.yearsRun.join(', ')}.<br />
-            Loaded candles: {result.loadedCandles.toLocaleString()} | Entry: {result.actualConfig.entryMode} | GTX style: {result.actualConfig.makerEntryFillStyle || 'n/a'} | TP mode: {result.actualConfig.tpMode} | Slippage: {result.actualConfig.slippageMode}<br />
+            <b>Run complete.</b> {result.summary.trades.toLocaleString()} filled trades across {result.yearsRun.join(', ')}.<br />Run ID: <code>{result.runMeta?.runId}</code><br />
+            Loaded candles: {result.loadedCandles.toLocaleString()} | Global entry: {result.actualConfig.entryMode} | D entry: {result.actualConfig.engineEntryMode?.D} / {result.actualConfig.engineMakerEntryFillStyle?.D} | E entry: {result.actualConfig.engineEntryMode?.E} / {result.actualConfig.engineMakerEntryFillStyle?.E} | TP mode: {result.actualConfig.tpMode} | Slippage: {result.actualConfig.slippageMode}<br />
             TP RR: {fmt(result.actualConfig.tpRMultiple, 2)} | Max R used: {fmt(result.summary.maxRiskUsed, 2)} | Seed: {result.actualConfig.randomSeed}
           </div>
 
@@ -190,6 +260,10 @@ export default function App() {
               <div>TP maker exits: {result.summary.tpMakerCount}</div>
               <div>TP taker exits: {result.summary.tpTakerCount}</div>
               <div>TP fallback exits: {result.summary.tpFallbackCount}</div>
+              <div>GTX rejected toward TP: {result.summary.gtxRejectTowardTP}</div>
+              <div>GTX→taker fallback entries: {result.summary.gtxRejectTakerFallbackEntries}</div>
+              <div>GTX/maker attempt → market fallback entries: {result.summary.makerAttemptMarketFallbackEntries}</div>
+              <div>GTX rejected toward TP by engine: <code>{JSON.stringify(result.summary.gtxRejectTowardTPByEngine || {})}</code></div>
             </div>
           </div>
 
@@ -210,14 +284,29 @@ export default function App() {
             <div className="card">
               <h3>Exports</h3>
               <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
-                <button onClick={() => downloadJson('eth-sim-trades.json', result.results)}>Download trades</button>
-                <button onClick={() => downloadJson('eth-sim-missed.json', result.missedSignals)}>Download missed</button>
-                <button onClick={() => downloadJson('eth-sim-signals.json', result.signalLedger)}>Download signal ledger</button>
-                <button onClick={() => downloadJson('eth-sim-summary.json', { summary: result.summary, engineStats: result.engineStats, actualConfig: result.actualConfig, yearByYear: result.yearByYear })}>Download summary</button>
+                <button onClick={() => downloadJson(`${result.runMeta?.runId || 'eth-sim'}__trades.json`, { runMeta: result.runMeta, rows: result.results })}>Download trades</button>
+                <button onClick={() => downloadJson(`${result.runMeta?.runId || 'eth-sim'}__missed.json`, { runMeta: result.runMeta, rows: result.missedSignals })}>Download missed</button>
+                <button onClick={() => downloadJson(`${result.runMeta?.runId || 'eth-sim'}__signals.json`, { runMeta: result.runMeta, rows: result.signalLedger })}>Download signal ledger</button>
+                <button onClick={() => downloadJson(`${result.runMeta?.runId || 'eth-sim'}__summary.json`, { runMeta: result.runMeta, summary: result.summary, engineStats: result.engineStats, actualConfig: result.actualConfig, yearByYear: result.yearByYear })}>Download summary</button>
+                <button onClick={() => downloadJson(`${result.runMeta?.runId || 'eth-sim'}__full_package.json`, { runMeta: result.runMeta, summary: result.summary, engineStats: result.engineStats, actualConfig: result.actualConfig, yearByYear: result.yearByYear, trades: result.results, missed: result.missedSignals, signalLedger: result.signalLedger })}>Download full package</button>
+                <button onClick={() => downloadJson(`eth-sim-run-history.json`, runHistory)}>Download run history</button>
               </div>
               <h3>Actual config used</h3>
               <pre style={{ whiteSpace:'pre-wrap', fontSize:11, maxHeight:320, overflow:'auto' }}>{JSON.stringify(result.actualConfig, null, 2)}</pre>
             </div>
+          </div>
+
+          <div className="card" style={{ marginBottom:16 }}>
+            <h3>Run history in this browser session</h3>
+            <div style={{ color:'var(--text3)', fontSize:12, marginBottom:8 }}>Each run receives a unique Run ID and exports include the exact parameters used. Download run history for side-by-side comparison summaries.</div>
+            <table className="sim-table">
+              <thead><tr><th>Run ID</th><th>Years</th><th>D entry</th><th>E entry</th><th>TP mode</th><th>WR %</th><th>Net R</th><th>Fee R</th><th>Filled</th><th>Missed</th></tr></thead>
+              <tbody>
+                {runHistory.slice(0, 8).map(h => (
+                  <tr key={h.runId}><td style={{ maxWidth:260, overflow:'hidden', textOverflow:'ellipsis' }}>{h.runId}</td><td>{h.selectedYears.join(',')}</td><td>{h.modeSummary.dEntryMode}/{h.modeSummary.dGtxModel}</td><td>{h.modeSummary.eEntryMode}/{h.modeSummary.eGtxModel}</td><td>{h.modeSummary.tpMode}</td><td>{fmt(h.summary.winRate*100,2)}</td><td>{fmt(h.summary.netR,2)}</td><td>{fmt(h.summary.feeR,2)}</td><td>{h.summary.filledCount}</td><td>{h.summary.missedCount}</td></tr>
+                ))}
+              </tbody>
+            </table>
           </div>
 
           <div className="card" style={{ marginBottom:16 }}>
