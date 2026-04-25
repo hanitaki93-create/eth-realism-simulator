@@ -37,6 +37,7 @@ function modeSummary(config) {
     fixedRisk: config.fixedRisk,
     riskPct: config.riskPct,
     riskCap: config.riskCap,
+    selectedLeverage: config.selectedLeverage,
     compounding: config.compounding,
     tpRMultiple: config.tpRMultiple,
     dEntryMode: config.engineEntryMode?.D || config.entryMode,
@@ -193,7 +194,7 @@ export default function App() {
   return (
     <div style={{ maxWidth: 1700, margin: '0 auto', padding: 20 }}>
       <h1 style={{ marginBottom: 4 }}>ETH Binance Realism Simulator</h1>
-      <div style={{ color: 'var(--text3)', marginBottom: 16 }}>Two-pass version: pure signal ledger first, execution overlay second. Panel controls are wired and contradictory controls are disabled.</div>
+      <div style={{ color: 'var(--text3)', marginBottom: 16 }}>Two-pass version: pure signal ledger first, execution overlay second. Latency/open GTX is deterministic price-proxy logic and does not use the 88% probability model.</div>
       <ScenarioForm config={config} setConfig={setConfig} onRun={runScenario} loading={loading} />
       <div className="card" style={{ marginBottom: 16 }}>{status}</div>
 
@@ -202,10 +203,10 @@ export default function App() {
           <div className="card" style={{ marginBottom: 16 }}>
             <b>Run complete.</b> {result.summary.trades.toLocaleString()} filled trades across {result.yearsRun.join(', ')}.<br />Run ID: <code>{result.runMeta?.runId}</code><br />
             Loaded candles: {result.loadedCandles.toLocaleString()} | Global entry: {result.actualConfig.entryMode} | D entry: {result.actualConfig.engineEntryMode?.D} / {result.actualConfig.engineMakerEntryFillStyle?.D} | E entry: {result.actualConfig.engineEntryMode?.E} / {result.actualConfig.engineMakerEntryFillStyle?.E} | TP mode: {result.actualConfig.tpMode} | Slippage: {result.actualConfig.slippageMode}<br />
-            TP RR: {fmt(result.actualConfig.tpRMultiple, 2)} | Max R used: {fmt(result.summary.maxRiskUsed, 2)} | Seed: {result.actualConfig.randomSeed}
+            TP RR: {fmt(result.actualConfig.tpRMultiple, 2)} | Max R used: {fmt(result.summary.maxRiskUsed, 2)} | Selected leverage: {fmt(result.actualConfig.selectedLeverage,0)}x | Seed: {result.actualConfig.randomSeed}
           </div>
 
-          <div style={{ display:'grid', gridTemplateColumns:'repeat(8, minmax(0,1fr))', gap:10, marginBottom:16 }}>
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(10, minmax(0,1fr))', gap:10, marginBottom:16 }}>
             <StatCard label="Signals" value={result.summary.signalCount} dec={0} />
             <StatCard label="Filled" value={result.summary.filledCount} dec={0} />
             <StatCard label="Missed" value={result.summary.missedCount} dec={0} />
@@ -214,6 +215,8 @@ export default function App() {
             <StatCard label="Fee R" value={result.summary.feeR} dec={2} />
             <StatCard label="Net R" value={result.summary.netR} dec={2} />
             <StatCard label="End Balance" value={result.summary.endBalance} dec={2} />
+            <StatCard label="Max Lev Req" value={result.summary.maxRequiredLeverage} dec={2} />
+            <StatCard label="Bad @ Lev" value={result.summary.infeasibleAtSelectedLeverage} dec={0} />
           </div>
 
           <div style={{ display:'grid', gridTemplateColumns:'1.25fr 1fr', gap:16, marginBottom:16 }}>
@@ -250,6 +253,12 @@ export default function App() {
               <div>Median fee R: {fmt(result.summary.medianFeeR, 4)}</div>
               <div>Avg notional: {fmt(result.summary.avgNotional, 2)}</div>
               <div>Median notional: {fmt(result.summary.medianNotional, 2)}</div>
+              <div>Avg required leverage: {fmt(result.summary.avgRequiredLeverage, 2)}x</div>
+              <div>Median required leverage: {fmt(result.summary.medianRequiredLeverage, 2)}x</div>
+              <div>Max required leverage: {fmt(result.summary.maxRequiredLeverage, 2)}x</div>
+              <div>Selected leverage: {fmt(result.summary.selectedLeverage, 0)}x</div>
+              <div>Infeasible at selected leverage: {fmt(result.summary.infeasibleAtSelectedLeverage, 0)}</div>
+              <div>Leverage checks: <code>{JSON.stringify(result.summary.leverageFeasibility || {})}</code></div>
               <div>Avg SL distance: {fmt(result.summary.avgSLDistance, 4)} pts</div>
               <div>Median SL distance: {fmt(result.summary.medianSLDistance, 4)} pts</div>
               <div>Avg entry slip: {fmt(result.summary.avgEntrySlip, 4)} pts</div>
@@ -260,10 +269,14 @@ export default function App() {
               <div>TP maker exits: {result.summary.tpMakerCount}</div>
               <div>TP taker exits: {result.summary.tpTakerCount}</div>
               <div>TP fallback exits: {result.summary.tpFallbackCount}</div>
-              <div>GTX rejected toward TP: {result.summary.gtxRejectTowardTP}</div>
-              <div>GTX→taker fallback entries: {result.summary.gtxRejectTakerFallbackEntries}</div>
-              <div>GTX/maker attempt → market fallback entries: {result.summary.makerAttemptMarketFallbackEntries}</div>
-              <div>GTX rejected toward TP by engine: <code>{JSON.stringify(result.summary.gtxRejectTowardTPByEngine || {})}</code></div>
+              <div>GTX passive misses toward TP: {result.summary.gtxPassiveMissTowardTP}</div>
+              <div>GTX rejected/crossing toward SL: {result.summary.gtxRejectedTowardSL}</div>
+              <div>GTX accepted near-entry maker fills: {result.summary.gtxAcceptedNearEntry}</div>
+              <div>GTX rejected toward TP: {result.summary.gtxRejectTowardTP} <span style={{color:'var(--text3)'}}>(should be near 0 under corrected latency/open logic)</span></div>
+              <div>GTX reject→taker fallback entries: {result.summary.gtxRejectTakerFallbackEntries}</div>
+              <div>GTX attempt→market fallback entries: {result.summary.makerAttemptMarketFallbackEntries}</div>
+              <div>Passive miss toward TP by engine: <code>{JSON.stringify(result.summary.gtxPassiveMissTowardTPByEngine || {})}</code></div>
+              <div>Rejected toward SL by engine: <code>{JSON.stringify(result.summary.gtxRejectedTowardSLByEngine || {})}</code></div>
             </div>
           </div>
 
