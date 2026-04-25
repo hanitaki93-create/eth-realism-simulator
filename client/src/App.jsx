@@ -150,7 +150,7 @@ export default function App() {
         const netR = rows.reduce((a, r) => a + r.pnlR, 0);
         const grossR = rows.reduce((a, r) => a + r.grossRBeforeFees, 0);
         const feeR = rows.reduce((a, r) => a + r.feeR, 0);
-        const wins = rows.filter(r => r.pnlR > 0).length;
+        const wins = rows.filter(r => r.status === 'TP').length;
         const pnlUsd = rows.reduce((a, r) => a + r.pnlUsd, 0);
         return {
           year,
@@ -203,7 +203,7 @@ export default function App() {
           <div className="card" style={{ marginBottom: 16 }}>
             <b>Run complete.</b> {result.summary.trades.toLocaleString()} filled trades across {result.yearsRun.join(', ')}.<br />Run ID: <code>{result.runMeta?.runId}</code><br />
             Loaded candles: {result.loadedCandles.toLocaleString()} | Global entry: {result.actualConfig.entryMode} | D entry: {result.actualConfig.engineEntryMode?.D} / {result.actualConfig.engineMakerEntryFillStyle?.D} | E entry: {result.actualConfig.engineEntryMode?.E} / {result.actualConfig.engineMakerEntryFillStyle?.E} | TP mode: {result.actualConfig.tpMode} | Slippage: {result.actualConfig.slippageMode}<br />
-            TP RR: {fmt(result.actualConfig.tpRMultiple, 2)} | Max R used: {fmt(result.summary.maxRiskUsed, 2)} | Selected leverage: {fmt(result.actualConfig.selectedLeverage,0)}x | Seed: {result.actualConfig.randomSeed}
+            TP RR: {fmt(result.actualConfig.tpRMultiple, 2)} | Equity floor: {result.actualConfig.enforceEquityFloor ? 'ON' : 'OFF'} | Leverage block: {result.actualConfig.enforceLeverageLimit ? 'ON' : 'OFF'} | Risk basis: {result.actualConfig.positionSizingBasis} | Max R used: {fmt(result.summary.maxRiskUsed, 2)} | Selected leverage: {fmt(result.actualConfig.selectedLeverage,0)}x | Seed: {result.actualConfig.randomSeed}
           </div>
 
           <div style={{ display:'grid', gridTemplateColumns:'repeat(10, minmax(0,1fr))', gap:10, marginBottom:16 }}>
@@ -245,6 +245,12 @@ export default function App() {
               <div>Start balance: {fmt(result.summary.startBalance, 2)}</div>
               <div>End balance: {fmt(result.summary.endBalance, 2)}</div>
               <div>Fees deducted: {fmt(result.summary.totalFeeUsd, 2)}</div>
+              <div>TP / SL / Timeout: {result.summary.wins} / {result.summary.losses} / {result.summary.timeouts}</div>
+              <div>Net-positive trades: {result.summary.netPositiveTrades}</div>
+              <div>Clean gross from status formula: {fmt(result.summary.cleanGrossRFromStatus, 2)}R</div>
+              <div>Gross R difference vs status formula: {fmt(result.summary.grossRDiffFromStatusFormula, 2)}R</div>
+              <div>Missed insufficient equity: {result.summary.missedInsufficientEquity}</div>
+              <div>Missed leverage infeasible: {result.summary.missedLeverageInfeasible}</div>
               <div>Total turnover: {fmt(result.summary.totalTurnover, 2)}</div>
               <div>Fee / total turnover: {fmt(result.summary.feeTurnoverPct, 4)}%</div>
               <div>Round-trip fee vs one-way notional: {fmt(result.summary.roundTripFeeOneWayPct, 4)}%</div>
