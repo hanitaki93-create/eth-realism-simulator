@@ -20,6 +20,9 @@ export const DEFAULT_CONFIG = {
   riskCap: 1000,
   selectedLeverage: 20,
   leverageCheckLevels: [10, 15, 20],
+  enforceEquityFloor: true,
+  enforceLeverageLimit: false,
+  positionSizingBasis: 'signal_entry', // signal_entry | actual_entry
   compounding: 'per_trade', // none | per_trade | daily | monthly | quarterly
   oneWayMode: true,
   allowStacking: false,
@@ -122,6 +125,9 @@ function normalizeConfig(config = {}) {
   }
   merged.gtxRejectBufferPts = Math.max(0, Number(merged.gtxRejectBufferPts) || 0);
   merged.selectedLeverage = Math.max(1, Number(merged.selectedLeverage) || DEFAULT_CONFIG.selectedLeverage);
+  merged.enforceEquityFloor = merged.enforceEquityFloor !== false;
+  merged.enforceLeverageLimit = !!merged.enforceLeverageLimit;
+  if (!['signal_entry','actual_entry'].includes(merged.positionSizingBasis)) merged.positionSizingBasis = DEFAULT_CONFIG.positionSizingBasis;
   merged.leverageCheckLevels = Array.isArray(merged.leverageCheckLevels) && merged.leverageCheckLevels.length ? merged.leverageCheckLevels.map(v => Math.max(1, Number(v) || 1)) : DEFAULT_CONFIG.leverageCheckLevels;
 
   merged.tpRMultiple = Math.max(0.1, Number(merged.tpRMultiple) || DEFAULT_CONFIG.tpRMultiple);
@@ -445,7 +451,7 @@ function tryFillEntry(signal, candles, cfg, rand) {
       entryFillReason: 'TAKER_MARKET',
       makerEntryFillStyle: 'taker',
       actualEntryMode: 'taker_market',
-      entryBasePrice: refPrice,
+      entryBasePrice: signal.entry,
       gtxDecisionModel: 'none_taker_market',
       gtxOutcome: null,
       gtxRejectDirection: null,
@@ -461,7 +467,7 @@ function tryFillEntry(signal, candles, cfg, rand) {
     const common = {
       fillProb: 1,
       makerEntryFillStyle: style,
-      gtxDecisionModel: 'latency_open_price_proxy',
+      gtxDecisionModel: 'latency_open_price_proxy_return_check',
       gtxOutcome: dec.outcome,
       gtxRejectDirection: dec.direction,
       gtxRejectMovedPts: dec.movedPts,
@@ -482,20 +488,53 @@ function tryFillEntry(signal, candles, cfg, rand) {
       };
     }
 
-    if (dec.rejected && mode === 'maker_gtx_then_taker') {
-      return makeMarketFallback('GTX_REJECTED_TOWARD_SL_TAKER_FALLBACK', start, {
+    if (dec.outcome === 'PASSIVE_MISS_TOWARD_TP') {
+      for (let i = start; i <= end; i++) {
+        const c = candles[i];
+        if (!c || !priceTouched(signal.side, signal.entry, c)) continue;
+        return {
+          ...common,
+          filled: true,
+          fillIdx: i,
+          touchedEntry: true,
+          entryFillReason: 'GTX_ACCEPTED_PASSIVE_RETURN_FILLED_MAKER',
+          actualEntryMode: 'maker_gtx_latency_open',
+          entryBasePrice: signal.entry,
+          takerFallbackUsed: false,
+          gtxOutcome: 'PASSIVE_RETURN_FILLED_MAKER',
+        };
+      }
+
+      if (marketFallbackAnyMiss) {
+        const fallbackIdx = end;
+        const fallbackCandle = candles[fallbackIdx] || activeCandle;
+        return makeMarketFallback('PASSIVE_MISS_NO_RETURN_MARKET_FALLBACK', fallbackIdx, {
+          ...common,
+          touchedEntry: false,
+          actualEntryMode: 'market_fallback_after_passive_no_return',
+          entryBasePrice: marketReferencePrice(signal, fallbackCandle),
+          gtxOutcome: 'PASSIVE_NO_RETURN',
+        });
+      }
+
+      return {
+        ...common,
+        filled: false,
+        fillIdx: null,
+        touchedEntry: false,
+        entryFillReason: 'PASSIVE_MISS_NO_RETURN',
+        actualEntryMode: 'maker_gtx_latency_open',
+        entryBasePrice: refPrice,
+        takerFallbackUsed: false,
+        gtxOutcome: 'PASSIVE_NO_RETURN',
+      };
+    }
+
+    if (dec.rejected && (mode === 'maker_gtx_then_taker' || mode === 'maker_gtx_then_market')) {
+      return makeMarketFallback('GTX_REJECTED_CROSSING_TOWARD_SL_TAKER_FALLBACK', start, {
         ...common,
         touchedEntry: false,
         actualEntryMode: 'taker_fallback_after_gtx_reject',
-        entryBasePrice: refPrice,
-      });
-    }
-
-    if (marketFallbackAnyMiss) {
-      return makeMarketFallback(dec.outcome + '_MARKET_FALLBACK', start, {
-        ...common,
-        touchedEntry: dec.filledMaker,
-        actualEntryMode: dec.rejected ? 'market_fallback_after_gtx_reject' : 'market_fallback_after_gtx_passive_miss',
         entryBasePrice: refPrice,
       });
     }
@@ -532,7 +571,7 @@ function tryFillEntry(signal, candles, cfg, rand) {
       gtxPassiveMissTowardTP: false,
       takerFallbackUsed: false,
     };
-    if (marketFallbackAnyMiss) return makeMarketFallback('MAKER_NEUTRAL_MISSED_MARKET_FALLBACK', start, { touchedEntry: true, gtxDecisionModel: 'neutral_probability', gtxOutcome: 'PROB_MISSED' });
+    if (marketFallbackAnyMiss) return makeMarketFallback('MAKER_NEUTRAL_MISSED_MARKET_FALLBACK', start, { touchedEntry: true, gtxDecisionModel: 'neutral_probability', gtxOutcome: 'PROB_MISSED', entryBasePrice: signal.entry });
     return {
       filled: false,
       fillIdx: null,
@@ -711,7 +750,11 @@ function passTwoExecution(signals, candles, cfg) {
       continue;
     }
 
-    const qty = riskUsd / sig.slDistance;
+    if (cfg.enforceEquityFloor && equityBefore < riskUsd) {
+      missed.push({ ...sig, ...entryAttempt, missedReason: 'INSUFFICIENT_EQUITY', equityBefore: fmtNum(equityBefore, 2), riskUsd: fmtNum(riskUsd, 2) });
+      continue;
+    }
+
     const entryCandle = candles[entryAttempt.fillIdx] || candles[sig.signalIdx];
     let entrySlip = 0;
     let entryPrice = entryAttempt.entryBasePrice ?? sig.entry;
@@ -722,13 +765,21 @@ function passTwoExecution(signals, candles, cfg) {
       entryPrice = isLong(sig.side) ? entryPrice + entrySlip : entryPrice - entrySlip;
     }
 
-    const exit = resolveExecutedExit(sig, candles, entryAttempt.fillIdx, cfg, rand);
-    const grossPnl = isLong(sig.side) ? (exit.exitPrice - entryPrice) * qty : (entryPrice - exit.exitPrice) * qty;
+    const actualRiskDistance = Math.abs(entryPrice - sig.sl);
+    const sizingDistance = cfg.positionSizingBasis === 'actual_entry' ? Math.max(actualRiskDistance, 0.0001) : sig.slDistance;
+    const qty = riskUsd / sizingDistance;
     const entryNotional = Math.abs(entryPrice * qty);
-    const exitNotional = Math.abs(exit.exitPrice * qty);
     const requiredLeverage = equityBefore > 0 ? entryNotional / equityBefore : Infinity;
     const requiredMarginAtSelectedLeverage = entryNotional / cfg.selectedLeverage;
     const leverageFeasibleAtSelected = requiredMarginAtSelectedLeverage <= equityBefore;
+    if (cfg.enforceLeverageLimit && !leverageFeasibleAtSelected) {
+      missed.push({ ...sig, ...entryAttempt, missedReason: 'LEVERAGE_INFEASIBLE', equityBefore: fmtNum(equityBefore, 2), riskUsd: fmtNum(riskUsd, 2), entryBasePrice: fmtNum(entryAttempt.entryBasePrice ?? sig.entry, 4), entry: fmtNum(entryPrice, 4), qty: fmtNum(qty, 6), entryNotional: fmtNum(entryNotional, 2), requiredLeverage: fmtNum(requiredLeverage, 4), selectedLeverage: cfg.selectedLeverage, requiredMarginAtSelectedLeverage: fmtNum(requiredMarginAtSelectedLeverage, 2) });
+      continue;
+    }
+
+    const exit = resolveExecutedExit(sig, candles, entryAttempt.fillIdx, cfg, rand);
+    const grossPnl = isLong(sig.side) ? (exit.exitPrice - entryPrice) * qty : (entryPrice - exit.exitPrice) * qty;
+    const exitNotional = Math.abs(exit.exitPrice * qty);
     const entryFeeUsd = feeFor(entryNotional, entryMaker, cfg);
     const exitFeeUsd = feeFor(exitNotional, exit.exitMaker, cfg);
     const totalFeeUsd = entryFeeUsd + exitFeeUsd;
@@ -788,6 +839,9 @@ function passTwoExecution(signals, candles, cfg) {
       tpMakerAttempts: exit.tpMakerAttempts,
       tpMakerFails: exit.tpMakerFails,
       tpFallbackUsed: exit.tpFallbackUsed,
+      actualRiskDistance: fmtNum(actualRiskDistance, 4),
+      sizingDistance: fmtNum(sizingDistance, 4),
+      positionSizingBasis: cfg.positionSizingBasis,
       slippageModeUsed: cfg.slippageMode,
     };
 
@@ -813,6 +867,8 @@ function summarizeByEngine(cfg, pass1, pass2) {
     missedProb: 0,
     wins: 0,
     losses: 0,
+    timeouts: 0,
+    netPositiveTrades: 0,
   }]));
 
   for (const t of pass2.executed) {
@@ -822,7 +878,8 @@ function summarizeByEngine(cfg, pass1, pass2) {
     s.executedGrossR += t.grossRBeforeFees;
     s.executedNetR += t.pnlR;
     s.feeR += t.feeR;
-    if (t.pnlR > 0) s.wins += 1; else s.losses += 1;
+    if (t.status === 'TP') s.wins += 1; else if (t.status === 'SL') s.losses += 1; else s.timeouts += 1;
+    if (t.pnlR > 0) s.netPositiveTrades += 1;
   }
   for (const m of pass2.missed) {
     const s = engineStats[m.engine];
@@ -850,8 +907,10 @@ export function simulateScenario(candles, config) {
   const engineStats = summarizeByEngine(cfg, pass1, pass2);
 
   const results = [...pass2.executed].sort((a, b) => a.settleIdx - b.settleIdx);
-  const wins = results.filter(t => t.pnlR > 0).length;
-  const losses = results.filter(t => t.pnlR <= 0).length;
+  const wins = results.filter(t => t.status === 'TP').length;
+  const losses = results.filter(t => t.status === 'SL').length;
+  const timeouts = results.filter(t => t.status !== 'TP' && t.status !== 'SL').length;
+  const netPositiveTrades = results.filter(t => t.pnlR > 0).length;
   const totalFeeUsd = results.reduce((a, t) => a + t.totalFeeUsd, 0);
   const netR = results.reduce((a, t) => a + t.pnlR, 0);
   const grossR = results.reduce((a, t) => a + t.grossRBeforeFees, 0);
@@ -859,7 +918,7 @@ export function simulateScenario(candles, config) {
   const totalTurnover = results.reduce((a, t) => a + t.totalTurnover, 0);
 
   const signalWinRate = pass1.signals.length ? pass1.signals.filter(s => s.expectedGrossR > 0).length / pass1.signals.length : 0;
-  const filledWinRate = results.length ? wins / results.length : 0;
+  const filledWinRate = results.length ? results.filter(t => t.grossRBeforeFees > 0).length / results.length : 0;
   const missedWinners = pass2.missed.filter(s => s.expectedGrossR > 0).length;
   const missedLosers = pass2.missed.filter(s => s.expectedGrossR <= 0).length;
   const tpMakerCount = results.filter(t => t.status === 'TP' && t.exitFeeType === 'maker').length;
@@ -897,18 +956,24 @@ export function simulateScenario(candles, config) {
       trades: results.length,
       wins,
       losses,
+      timeouts,
+      netPositiveTrades,
       winRate: results.length ? wins / results.length : 0,
       signalCount: pass1.signals.length,
       filledCount: results.length,
       missedCount: pass2.missed.length,
       missedNoTouch,
       missedProb,
+      missedInsufficientEquity: pass2.missed.filter(m => (m.missedReason || '').includes('INSUFFICIENT_EQUITY')).length,
+      missedLeverageInfeasible: pass2.missed.filter(m => (m.missedReason || '').includes('LEVERAGE_INFEASIBLE')).length,
       signalWinRate,
       filledWinRate,
       biasRatio: signalWinRate > 0 ? filledWinRate / signalWinRate : 0,
       missedWinners,
       missedLosers,
       grossR: fmtNum(grossR, 4),
+      cleanGrossRFromStatus: fmtNum((wins * cfg.tpRMultiple) - losses, 4),
+      grossRDiffFromStatusFormula: fmtNum(grossR - ((wins * cfg.tpRMultiple) - losses), 4),
       feeR: fmtNum(feeR, 4),
       netR: fmtNum(netR, 4),
       avgR: fmtNum(results.length ? netR / results.length : 0, 4),
