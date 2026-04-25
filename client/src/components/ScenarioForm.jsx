@@ -11,7 +11,9 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
   const set = (k, v) => setConfig(prev => ({ ...prev, [k]: v }));
   const setNested = (root, k, v) => setConfig(prev => ({ ...prev, [root]: { ...prev[root], [k]: v } }));
   const setEngine = (id, v) => setConfig(prev => ({ ...prev, engines: { ...prev.engines, [id]: v } }));
+  const setEngineExec = (root, id, v) => setConfig(prev => ({ ...prev, [root]: { ...(prev[root] || {}), [id]: v } }));
 
+  const chooseYear = (year) => setConfig(prev => ({ ...prev, selectedYears: [year] }));
   const toggleYear = (year) => {
     setConfig(prev => {
       const has = prev.selectedYears.includes(year);
@@ -23,14 +25,21 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
   const slippageMode = config.slippageMode || 'dynamic';
   const tpMode = config.tpMode || 'market';
   const entryMode = config.entryMode || 'maker_gtx';
+  const perEngineIds = ['D','E'];
   const presetActive = slippageMode === 'preset';
   const manualActive = slippageMode === 'manual';
   const dynamicActive = slippageMode === 'dynamic';
-  const makerEntryActive = entryMode === 'maker_gtx';
-  const entryTouchTimeoutActive = makerEntryActive && (config.makerEntryFillStyle === 'touch_gated' || config.makerEntryFillStyle === 'hybrid');
+  const makerEntryActive = entryMode === 'maker_gtx' || entryMode === 'maker_gtx_then_taker' || entryMode === 'maker_gtx_then_market';
+  const anyEngineMaker = perEngineIds.some(id => (config.engineEntryMode?.[id] || entryMode) !== 'taker_market');
+  const anyTouchStyle = (makerEntryActive && (config.makerEntryFillStyle === 'touch_gated' || config.makerEntryFillStyle === 'hybrid')) || perEngineIds.some(id => {
+    const engMode = config.engineEntryMode?.[id] || entryMode;
+    const engStyle = config.engineMakerEntryFillStyle?.[id] || config.makerEntryFillStyle;
+    return engMode !== 'taker_market' && (engStyle === 'touch_gated' || engStyle === 'hybrid');
+  });
+  const entryTouchTimeoutActive = anyTouchStyle;
   const tpMakerActive = tpMode === 'maker_limit' || tpMode === 'maker_then_market';
   const tpFallbackActive = tpMode === 'maker_then_market';
-  const fillModelActive = makerEntryActive;
+  const fillModelActive = makerEntryActive || anyEngineMaker;
 
   return (
     <div className="card" style={{ marginBottom: 16 }}>
@@ -84,6 +93,8 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
         <label>Entry Mode
           <select style={inputStyle} value={entryMode} onChange={e=>set('entryMode', e.target.value)}>
             <option value="maker_gtx">Maker GTX</option>
+            <option value="maker_gtx_then_taker">GTX reject → taker fallback</option>
+            <option value="maker_gtx_then_market">GTX attempt → market fallback</option>
             <option value="taker_market">Taker Market</option>
           </select>
         </label>
@@ -105,16 +116,57 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
         <label style={makerEntryActive ? {} : disabledStyle}>GTX Fill Style
           <select style={inputStyle} disabled={!makerEntryActive} value={config.makerEntryFillStyle || 'neutral_prob'} onChange={e=>set('makerEntryFillStyle', e.target.value)}>
             <option value="neutral_prob">Neutral probability</option>
+            <option value="latency_open">Latency/open GTX proxy</option>
             <option value="hybrid">Hybrid immediate + touch</option>
             <option value="touch_gated">Strict touch-gated</option>
           </select>
         </label>
 
+        <label>GTX Reject Buffer pts<NumInput step="0.01" value={config.gtxRejectBufferPts ?? 0.01} onChange={v=>set('gtxRejectBufferPts', v)} /></label>
         <label>Pending Confirm Candles<NumInput value={config.entryTimeoutCandles} onChange={v=>set('entryTimeoutCandles', v)} /></label>
         <label style={entryTouchTimeoutActive ? {} : disabledStyle}>Maker Entry Timeout<NumInput disabled={!entryTouchTimeoutActive} value={config.makerEntryTimeoutCandles} onChange={v=>set('makerEntryTimeoutCandles', v)} /></label>
         <label>Max Hold Candles<NumInput value={config.maxHoldCandles} onChange={v=>set('maxHoldCandles', v)} /></label>
         <label>Random Seed<NumInput value={config.randomSeed} onChange={v=>set('randomSeed', v)} /></label>
 
+
+      </div>
+
+      <div className="card" style={{ marginTop:12, background:'rgba(255,255,255,0.03)' }}>
+        <h3>D/E execution overrides</h3>
+        <div style={{ color:'var(--text3)', fontSize:12, marginBottom:8 }}>
+          End-game testing panel: D can be taker/GTX/fallback while E stays GTX. The latency/open proxy uses candle movement around order placement, not a flat block percentage.
+        </div>
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(6, minmax(0,1fr))', gap:12 }}>
+          {perEngineIds.map(id => {
+            const engMode = config.engineEntryMode?.[id] || config.entryMode || 'maker_gtx';
+            const engStyle = config.engineMakerEntryFillStyle?.[id] || config.makerEntryFillStyle || 'neutral_prob';
+            const engIsMaker = engMode !== 'taker_market';
+            return <React.Fragment key={id}>
+              <label>{id} Entry Mode
+                <select style={inputStyle} value={engMode} onChange={e=>setEngineExec('engineEntryMode', id, e.target.value)}>
+                  <option value="maker_gtx">Maker GTX</option>
+                  <option value="maker_gtx_then_taker">GTX reject → taker fallback</option>
+                  <option value="maker_gtx_then_market">GTX attempt → market fallback</option>
+                  <option value="taker_market">Taker Market</option>
+                </select>
+              </label>
+              <label style={engIsMaker ? {} : disabledStyle}>{id} GTX Model
+                <select style={inputStyle} disabled={!engIsMaker} value={engStyle} onChange={e=>setEngineExec('engineMakerEntryFillStyle', id, e.target.value)}>
+                  <option value="neutral_prob">Neutral probability</option>
+                  <option value="latency_open">Latency/open proxy</option>
+                  <option value="hybrid">Hybrid immediate + touch</option>
+                  <option value="touch_gated">Strict touch-gated</option>
+                </select>
+              </label>
+              <label>{id} Fill Prob Override
+                <input style={inputStyle} type="number" step="0.01" placeholder="global" value={config.engineFillProbOverride?.[id] ?? ''} onChange={e=>setEngineExec('engineFillProbOverride', id, e.target.value === '' ? null : +e.target.value)} />
+              </label>
+            </React.Fragment>;
+          })}
+        </div>
+      </div>
+
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(6, minmax(0,1fr))', gap:12, marginTop:12 }}>
         <label>TP Mode
           <select style={inputStyle} value={tpMode} onChange={e=>set('tpMode', e.target.value)}>
             <option value="market">TP Market / Taker</option>
@@ -124,6 +176,7 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
         </label>
         <label style={tpMakerActive ? {} : disabledStyle}>TP Maker Fill Prob<NumInput step="0.01" disabled={!tpMakerActive} value={config.tpMakerFillProb} onChange={v=>set('tpMakerFillProb', v)} /></label>
         <label style={tpFallbackActive ? {} : disabledStyle}>TP Fallback Candles<NumInput disabled={!tpFallbackActive} value={config.tpFallbackCandles} onChange={v=>set('tpFallbackCandles', v)} /></label>
+        <label style={tpFallbackActive ? {} : disabledStyle}>TP Fallback Seconds<NumInput disabled={!tpFallbackActive} value={config.tpFallbackSeconds ?? 45} onChange={v=>set('tpFallbackSeconds', v)} /></label>
 
         <label>Maker Fee bps<NumInput step="0.1" value={config.feeMakerBps} onChange={v=>set('feeMakerBps', v)} /></label>
         <label>Taker Fee bps<NumInput step="0.1" value={config.feeTakerBps} onChange={v=>set('feeTakerBps', v)} /></label>
@@ -155,10 +208,17 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
 
       <div style={{ display:'flex', gap:12, marginTop:12, alignItems:'center', flexWrap:'wrap' }}>
         <div>Years:</div>
+        <label>Selection
+          <select style={{ ...inputStyle, width: 120 }} value={config.yearSelectionMode || 'single'} onChange={e=>set('yearSelectionMode', e.target.value)}>
+            <option value="single">Single</option>
+            <option value="multi">Custom multi</option>
+          </select>
+        </label>
         {[2022, 2023, 2024, 2025].map(y => (
-          <button key={y} type="button" className={config.selectedYears.includes(y) ? 'primary' : ''} onClick={() => toggleYear(y)}>{y}</button>
+          <button key={y} type="button" className={config.selectedYears.includes(y) ? 'primary' : ''} onClick={() => (config.yearSelectionMode || 'single') === 'multi' ? toggleYear(y) : chooseYear(y)}>{y}</button>
         ))}
         <button type="button" onClick={() => set('selectedYears', [2022, 2023, 2024, 2025])}>All 4 years</button>
+        <span style={{ color:'var(--text3)', fontSize:12 }}>Single mode replaces the year. Custom multi toggles years.</span>
       </div>
 
       <div style={{ display:'flex', gap:12, marginTop:12, alignItems:'center', flexWrap:'wrap' }}>
