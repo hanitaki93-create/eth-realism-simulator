@@ -26,20 +26,23 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
   const tpMode = config.tpMode || 'market';
   const entryMode = config.entryMode || 'maker_gtx';
   const perEngineIds = ['D','E'];
+  const allEngineIds = Object.keys(config.engines || {}).length ? Object.keys(config.engines || {}) : ['D','E'];
+  const activeEngineIds = allEngineIds.filter(id => (config.engines || {})[id]);
   const presetActive = slippageMode === 'preset';
   const manualActive = slippageMode === 'manual';
   const dynamicActive = slippageMode === 'dynamic';
-  const makerEntryActive = entryMode === 'maker_gtx' || entryMode === 'maker_gtx_then_taker' || entryMode === 'maker_gtx_then_market';
-  const anyEngineMaker = perEngineIds.some(id => (config.engineEntryMode?.[id] || entryMode) !== 'taker_market');
-  const anyTouchStyle = (makerEntryActive && (config.makerEntryFillStyle === 'touch_gated' || config.makerEntryFillStyle === 'hybrid')) || perEngineIds.some(id => {
-    const engMode = config.engineEntryMode?.[id] || entryMode;
-    const engStyle = config.engineMakerEntryFillStyle?.[id] || config.makerEntryFillStyle;
-    return engMode !== 'taker_market' && (engStyle === 'touch_gated' || engStyle === 'hybrid');
-  });
-  const entryTouchTimeoutActive = anyTouchStyle;
+  const engineMode = (id) => config.engineEntryMode?.[id] || entryMode;
+  const engineStyle = (id) => config.engineMakerEntryFillStyle?.[id] || config.makerEntryFillStyle || 'neutral_prob';
+  const engineIsMaker = (id) => engineMode(id) !== 'taker_market';
+  const engineUsesProbability = (id) => engineIsMaker(id) && engineStyle(id) !== 'latency_open';
+  const engineUsesLatency = (id) => engineIsMaker(id) && engineStyle(id) === 'latency_open';
+  const engineUsesTouchTimeout = (id) => engineIsMaker(id) && (engineStyle(id) === 'touch_gated' || engineStyle(id) === 'hybrid');
+  const makerEntryActive = activeEngineIds.some(engineIsMaker);
+  const fillModelActive = activeEngineIds.some(engineUsesProbability);
+  const gtxRejectBufferActive = activeEngineIds.some(engineUsesLatency);
+  const entryTouchTimeoutActive = activeEngineIds.some(engineUsesTouchTimeout);
   const tpMakerActive = tpMode === 'maker_limit' || tpMode === 'maker_then_market';
   const tpFallbackActive = tpMode === 'maker_then_market';
-  const fillModelActive = makerEntryActive || anyEngineMaker;
 
   return (
     <div className="card" style={{ marginBottom: 16 }}>
@@ -63,6 +66,8 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
         )}
 
         <label>Max R Cap<NumInput value={config.riskCap} onChange={v=>set('riskCap', v)} /></label>
+
+        <label>Selected Leverage<NumInput value={config.selectedLeverage ?? 20} onChange={v=>set('selectedLeverage', v)} /></label>
 
         <label>Compounding
           <select style={inputStyle} value={config.compounding} onChange={e=>set('compounding', e.target.value)}>
@@ -93,8 +98,8 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
         <label>Entry Mode
           <select style={inputStyle} value={entryMode} onChange={e=>set('entryMode', e.target.value)}>
             <option value="maker_gtx">Maker GTX</option>
-            <option value="maker_gtx_then_taker">GTX reject → taker fallback</option>
-            <option value="maker_gtx_then_market">GTX attempt → market fallback</option>
+            <option value="maker_gtx_then_taker">GTX crossing reject → taker fallback</option>
+            <option value="maker_gtx_then_market">GTX any failed attempt → market fallback</option>
             <option value="taker_market">Taker Market</option>
           </select>
         </label>
@@ -122,7 +127,7 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
           </select>
         </label>
 
-        <label>GTX Reject Buffer pts<NumInput step="0.01" value={config.gtxRejectBufferPts ?? 0.01} onChange={v=>set('gtxRejectBufferPts', v)} /></label>
+        <label style={gtxRejectBufferActive ? {} : disabledStyle}>GTX Reject Buffer pts<NumInput step="0.01" disabled={!gtxRejectBufferActive} value={config.gtxRejectBufferPts ?? 0.01} onChange={v=>set('gtxRejectBufferPts', v)} /></label>
         <label>Pending Confirm Candles<NumInput value={config.entryTimeoutCandles} onChange={v=>set('entryTimeoutCandles', v)} /></label>
         <label style={entryTouchTimeoutActive ? {} : disabledStyle}>Maker Entry Timeout<NumInput disabled={!entryTouchTimeoutActive} value={config.makerEntryTimeoutCandles} onChange={v=>set('makerEntryTimeoutCandles', v)} /></label>
         <label>Max Hold Candles<NumInput value={config.maxHoldCandles} onChange={v=>set('maxHoldCandles', v)} /></label>
@@ -134,32 +139,33 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
       <div className="card" style={{ marginTop:12, background:'rgba(255,255,255,0.03)' }}>
         <h3>D/E execution overrides</h3>
         <div style={{ color:'var(--text3)', fontSize:12, marginBottom:8 }}>
-          End-game testing panel: D can be taker/GTX/fallback while E stays GTX. The latency/open proxy uses candle movement around order placement, not a flat block percentage.
+          End-game testing panel: D can be taker/GTX/fallback while E stays GTX. The latency/open proxy uses candle movement around order placement, not a flat block percentage. It separates passive miss toward TP from crossing rejection toward SL and ignores the 88% probability model. Maker fills are charged maker; only true fallback/market fills are charged taker.
         </div>
         <div style={{ display:'grid', gridTemplateColumns:'repeat(6, minmax(0,1fr))', gap:12 }}>
           {perEngineIds.map(id => {
-            const engMode = config.engineEntryMode?.[id] || config.entryMode || 'maker_gtx';
-            const engStyle = config.engineMakerEntryFillStyle?.[id] || config.makerEntryFillStyle || 'neutral_prob';
-            const engIsMaker = engMode !== 'taker_market';
+            const engMode = engineMode(id);
+            const engStyle = engineStyle(id);
+            const engIsMakerActive = engineIsMaker(id);
+            const engProbActive = engineUsesProbability(id);
             return <React.Fragment key={id}>
               <label>{id} Entry Mode
                 <select style={inputStyle} value={engMode} onChange={e=>setEngineExec('engineEntryMode', id, e.target.value)}>
                   <option value="maker_gtx">Maker GTX</option>
-                  <option value="maker_gtx_then_taker">GTX reject → taker fallback</option>
-                  <option value="maker_gtx_then_market">GTX attempt → market fallback</option>
+                  <option value="maker_gtx_then_taker">GTX crossing reject → taker fallback</option>
+                  <option value="maker_gtx_then_market">GTX any failed attempt → market fallback</option>
                   <option value="taker_market">Taker Market</option>
                 </select>
               </label>
-              <label style={engIsMaker ? {} : disabledStyle}>{id} GTX Model
-                <select style={inputStyle} disabled={!engIsMaker} value={engStyle} onChange={e=>setEngineExec('engineMakerEntryFillStyle', id, e.target.value)}>
+              <label style={engIsMakerActive ? {} : disabledStyle}>{id} GTX Model
+                <select style={inputStyle} disabled={!engIsMakerActive} value={engStyle} onChange={e=>setEngineExec('engineMakerEntryFillStyle', id, e.target.value)}>
                   <option value="neutral_prob">Neutral probability</option>
                   <option value="latency_open">Latency/open proxy</option>
                   <option value="hybrid">Hybrid immediate + touch</option>
                   <option value="touch_gated">Strict touch-gated</option>
                 </select>
               </label>
-              <label>{id} Fill Prob Override
-                <input style={inputStyle} type="number" step="0.01" placeholder="global" value={config.engineFillProbOverride?.[id] ?? ''} onChange={e=>setEngineExec('engineFillProbOverride', id, e.target.value === '' ? null : +e.target.value)} />
+              <label style={engProbActive ? {} : disabledStyle}>{id} Fill Prob Override
+                <input style={inputStyle} disabled={!engProbActive} type="number" step="0.01" placeholder={engProbActive ? 'global' : 'inactive'} value={config.engineFillProbOverride?.[id] ?? ''} onChange={e=>setEngineExec('engineFillProbOverride', id, e.target.value === '' ? null : +e.target.value)} />
               </label>
             </React.Fragment>;
           })}
@@ -176,7 +182,7 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
         </label>
         <label style={tpMakerActive ? {} : disabledStyle}>TP Maker Fill Prob<NumInput step="0.01" disabled={!tpMakerActive} value={config.tpMakerFillProb} onChange={v=>set('tpMakerFillProb', v)} /></label>
         <label style={tpFallbackActive ? {} : disabledStyle}>TP Fallback Candles<NumInput disabled={!tpFallbackActive} value={config.tpFallbackCandles} onChange={v=>set('tpFallbackCandles', v)} /></label>
-        <label style={tpFallbackActive ? {} : disabledStyle}>TP Fallback Seconds<NumInput disabled={!tpFallbackActive} value={config.tpFallbackSeconds ?? 45} onChange={v=>set('tpFallbackSeconds', v)} /></label>
+        <label style={tpFallbackActive ? {} : disabledStyle}>TP Fallback Seconds (live ref)<NumInput disabled={!tpFallbackActive} value={config.tpFallbackSeconds ?? 45} onChange={v=>set('tpFallbackSeconds', v)} /></label>
 
         <label>Maker Fee bps<NumInput step="0.1" value={config.feeMakerBps} onChange={v=>set('feeMakerBps', v)} /></label>
         <label>Taker Fee bps<NumInput step="0.1" value={config.feeTakerBps} onChange={v=>set('feeTakerBps', v)} /></label>
