@@ -69,6 +69,27 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
 
         <label>Selected Leverage<NumInput value={config.selectedLeverage ?? 20} onChange={v=>set('selectedLeverage', v)} /></label>
 
+        <label>Equity Floor
+          <select style={inputStyle} value={config.enforceEquityFloor === false ? 'off' : 'on'} onChange={e=>set('enforceEquityFloor', e.target.value === 'on')}>
+            <option value="on">ON — stop below risk</option>
+            <option value="off">OFF — diagnostic</option>
+          </select>
+        </label>
+
+        <label>Leverage Block
+          <select style={inputStyle} value={config.enforceLeverageLimit ? 'on' : 'off'} onChange={e=>set('enforceLeverageLimit', e.target.value === 'on')}>
+            <option value="off">OFF — report only</option>
+            <option value="on">ON — skip infeasible</option>
+          </select>
+        </label>
+
+        <label>Risk Size Basis
+          <select style={inputStyle} value={config.positionSizingBasis || 'signal_entry'} onChange={e=>set('positionSizingBasis', e.target.value)}>
+            <option value="signal_entry">Signal entry distance</option>
+            <option value="actual_entry">Actual entry-to-SL</option>
+          </select>
+        </label>
+
         <label>Compounding
           <select style={inputStyle} value={config.compounding} onChange={e=>set('compounding', e.target.value)}>
             <option value="none">None</option>
@@ -139,7 +160,7 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
       <div className="card" style={{ marginTop:12, background:'rgba(255,255,255,0.03)' }}>
         <h3>D/E execution overrides</h3>
         <div style={{ color:'var(--text3)', fontSize:12, marginBottom:8 }}>
-          End-game testing panel: D can be taker/GTX/fallback while E stays GTX. The latency/open proxy uses candle movement around order placement, not a flat block percentage. It separates passive miss toward TP from crossing rejection toward SL and ignores the 88% probability model. Maker fills are charged maker; only true fallback/market fills are charged taker.
+          End-game testing panel: D can be taker/GTX/fallback while E stays GTX. The latency/open proxy uses candle movement around order placement, not a flat block percentage. It separates accepted-passive orders, return-touch maker fills, passive no-return misses, and crossing rejections. Latency/open ignores the 88% probability model. Maker fills are charged maker; only true fallback/market fills are charged taker.
         </div>
         <div style={{ display:'grid', gridTemplateColumns:'repeat(6, minmax(0,1fr))', gap:12 }}>
           {perEngineIds.map(id => {
