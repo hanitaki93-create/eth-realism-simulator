@@ -1,55 +1,62 @@
-[README_ENDGAME_SIM_FINAL.md](https://github.com/user-attachments/files/27081517/README_ENDGAME_SIM_FINAL.md)
-# ETH Simulator Endgame Execution Patch
+[README_GODLIKE_GTX_TRUTH_PATCH.md](https://github.com/user-attachments/files/27082613/README_GODLIKE_GTX_TRUTH_PATCH.md)
+# God-like GTX Truth Patch
 
 Files to replace in GitHub:
-- client/src/simulatorCore.js
-- client/src/App.jsx
-- client/src/components/ScenarioForm.jsx
 
-## Added / fixed
+- `client/src/simulatorCore.js`
+- `client/src/App.jsx`
+- `client/src/components/ScenarioForm.jsx`
 
-1. Added new entry execution option:
-   - `GTX attempt → market fallback` (`maker_gtx_then_market`)
-   - This is different from `GTX reject → taker fallback`.
-   - `GTX reject → taker fallback` only rescues latency/open GTX rejections moving toward TP.
-   - `GTX attempt → market fallback` rescues any simulated maker GTX failure/miss/no-touch by entering market after the maker attempt fails.
+## Main correction
 
-2. Per-engine D/E entry controls remain separate:
-   - D can be market / GTX / reject fallback / attempt fallback.
-   - E can remain GTX while D is tested separately.
+`Latency/open GTX proxy` is now deterministic and does **not** use the 88% A/B/C probability model.
 
-3. Logs/exports strengthened:
-   - Every trade/missed/signal row gets `runId`, `runTimestamp`, `testYears`, `sourceYear`, and `modeSummary`.
-   - Export filenames include the run ID.
-   - Added full package export with summary, config, trades, missed trades, and signal ledger.
-   - Added browser-session run history table and export for side-by-side comparison.
+It separates three price-proxy outcomes:
 
-4. Year selection fixed:
-   - Single mode: clicking 2023 replaces 2022 and runs only 2023.
-   - Custom multi: clicking years toggles multiple years.
-   - All 4 years button still runs 2022-2025 together.
+1. `GTX_ACCEPTED_NEAR_ENTRY_FILLED_MAKER`
+   - price stayed near entry; maker fill is assumed.
+2. `PASSIVE_MISS_TOWARD_TP`
+   - price moved away in the TP direction; maker order would likely rest/passively miss, not reject.
+3. `GTX_REJECTED_CROSSING_TOWARD_SL`
+   - price moved through the order in the crossing direction; post-only/GTX likely rejects.
 
-5. Control contradiction fixes:
-   - Disabled controls remain inactive.
-   - Execution model controls stay enabled if D/E per-engine maker modes are active, even when global entry mode is taker.
-   - Maker Entry Timeout stays enabled when any active per-engine GTX model needs touch/hybrid timeout.
+## Entry modes under latency/open
 
-## Important limitation
-This is still a 5-minute OHLC simulator. It cannot perfectly simulate real GTX queue position, bid/ask, latency, order-book depth, or exact 15/30/45-second TP fallback behavior. The added `latency/open GTX proxy` is closer than flat fill probability, but it remains an approximation.
+- `Maker GTX`: only near-entry fills; passive misses and crossing rejects are missed.
+- `GTX crossing reject -> taker fallback`: only crossing rejects fall back to taker.
+- `GTX any failed attempt -> market fallback`: passive misses and crossing rejects both fall back to market/taker.
+- `Taker Market`: all eligible settled signals use taker entry.
 
-## Recommended first comparison set
-Run 2022 fixed risk first, then repeat 2023:
+## Panel audit fixes
 
-A. D Maker GTX + latency/open, E Maker GTX + neutral, TP maker_then_market
-B. D GTX reject → taker fallback + latency/open, E Maker GTX + neutral, TP maker_then_market
-C. D GTX attempt → market fallback + latency/open, E Maker GTX + neutral, TP maker_then_market
-D. D Taker Market, E Maker GTX + neutral, TP maker_then_market
+- Probability controls are disabled when active engines use latency/open proxy.
+- Per-engine fill-prob overrides are disabled for latency/open and taker-market engines.
+- GTX reject buffer is enabled only when at least one active engine uses latency/open proxy.
+- TP fallback seconds is labelled as live reference only; candle fallback remains the simulator behavior.
+
+## New logs/summary metrics
+
+- `gtxDecisionModel`
+- `gtxOutcome`
+- `gtxPassiveMissTowardTP`
+- `gtxRejected`
+- `gtxRejectDirection`
+- `gtxRejectMovedPts`
+- passive miss toward TP by engine
+- rejected/crossing toward SL by engine
+- accepted near-entry maker fills
+
+## Recommended truth-test settings
+
+For deterministic GTX reality proxy:
+
+- D GTX Model: `Latency/open proxy`
+- E GTX Model: `Latency/open proxy`
+- ignore A/B/C probabilities; they should be disabled/inactive
 
 Compare:
-- P(win|signal) vs P(win|filled)
-- Bias ratio
-- Fee R
-- Net R
-- maker entries vs taker entries
-- GTX rejected toward TP by engine
-- GTX/maker attempt → market fallback entries
+
+1. D Maker GTX / E Maker GTX
+2. D GTX any failed attempt -> market fallback / E Maker GTX
+3. D Taker Market / E Maker GTX
+4. E only, Maker GTX, RR 2 / 2.5 / 3
