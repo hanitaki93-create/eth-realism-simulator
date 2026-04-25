@@ -1,62 +1,22 @@
-[README_GODLIKE_GTX_TRUTH_PATCH.md](https://github.com/user-attachments/files/27082613/README_GODLIKE_GTX_TRUTH_PATCH.md)
-# God-like GTX Truth Patch
+[README_DIRECTIONAL_SIM_PATCH.md](https://github.com/user-attachments/files/27082619/README_DIRECTIONAL_SIM_PATCH.md)
+# Directional Simulator Patch - GTX/Fees/Leverage Truth Layer
 
-Files to replace in GitHub:
+Files to replace:
+- client/src/simulatorCore.js
+- client/src/App.jsx
+- client/src/components/ScenarioForm.jsx
 
-- `client/src/simulatorCore.js`
-- `client/src/App.jsx`
-- `client/src/components/ScenarioForm.jsx`
+Main fixes:
+1. Corrected entry fee classification bug: maker fills under `GTX reject -> taker fallback` are now charged as maker. Only actual market/taker fallback fills are charged as taker.
+2. Added selected leverage and leverage diagnostics: required leverage, notional/equity, selected leverage feasibility, and leverage check buckets.
+3. Added clearer trade exports: signalEntry, entryBasePrice, actual entry, equityBefore, qty, riskUsd, notional, requiredLeverage, leverageFeasibleAtSelected, GTX rejection direction and moved points.
+4. Kept engine-specific controls for D/E entry mode and GTX model.
+5. Latency/open GTX proxy remains the closer OHLC-only model for real GTX rejection; neutral probability remains a fill-probability model and should not be used as proof of real GTX rejection behavior.
 
-## Main correction
+Important interpretation:
+- To test true D GTX rejection fallback, use D GTX Model = Latency/open proxy.
+- If D GTX Model = Neutral probability, `GTX reject -> taker fallback` will not create real rejection fallback events; maker fills are maker and neutral misses are misses.
+- Full taker D remains a valid stress test.
 
-`Latency/open GTX proxy` is now deterministic and does **not** use the 88% A/B/C probability model.
-
-It separates three price-proxy outcomes:
-
-1. `GTX_ACCEPTED_NEAR_ENTRY_FILLED_MAKER`
-   - price stayed near entry; maker fill is assumed.
-2. `PASSIVE_MISS_TOWARD_TP`
-   - price moved away in the TP direction; maker order would likely rest/passively miss, not reject.
-3. `GTX_REJECTED_CROSSING_TOWARD_SL`
-   - price moved through the order in the crossing direction; post-only/GTX likely rejects.
-
-## Entry modes under latency/open
-
-- `Maker GTX`: only near-entry fills; passive misses and crossing rejects are missed.
-- `GTX crossing reject -> taker fallback`: only crossing rejects fall back to taker.
-- `GTX any failed attempt -> market fallback`: passive misses and crossing rejects both fall back to market/taker.
-- `Taker Market`: all eligible settled signals use taker entry.
-
-## Panel audit fixes
-
-- Probability controls are disabled when active engines use latency/open proxy.
-- Per-engine fill-prob overrides are disabled for latency/open and taker-market engines.
-- GTX reject buffer is enabled only when at least one active engine uses latency/open proxy.
-- TP fallback seconds is labelled as live reference only; candle fallback remains the simulator behavior.
-
-## New logs/summary metrics
-
-- `gtxDecisionModel`
-- `gtxOutcome`
-- `gtxPassiveMissTowardTP`
-- `gtxRejected`
-- `gtxRejectDirection`
-- `gtxRejectMovedPts`
-- passive miss toward TP by engine
-- rejected/crossing toward SL by engine
-- accepted near-entry maker fills
-
-## Recommended truth-test settings
-
-For deterministic GTX reality proxy:
-
-- D GTX Model: `Latency/open proxy`
-- E GTX Model: `Latency/open proxy`
-- ignore A/B/C probabilities; they should be disabled/inactive
-
-Compare:
-
-1. D Maker GTX / E Maker GTX
-2. D GTX any failed attempt -> market fallback / E Maker GTX
-3. D Taker Market / E Maker GTX
-4. E only, Maker GTX, RR 2 / 2.5 / 3
+VPS command after GitHub commit:
+cd /root/eth-realism-simulator && git pull && cd client && npm run build && cd .. && pm2 restart all
