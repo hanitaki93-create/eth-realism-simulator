@@ -29,16 +29,17 @@ export const DEFAULT_CONFIG = {
 
   // Signal/execution
   tpRMultiple: 2,
-  entryMode: 'maker_gtx', // global fallback: maker_gtx | taker_market | maker_gtx_then_taker | maker_gtx_then_market | normal_limit | normal_limit_then_market
-  makerEntryFillStyle: 'neutral_prob', // global fallback: neutral_prob | touch_gated | hybrid | latency_open
+  entryMode: 'maker_gtx', // maker_gtx | normal_limit | normal_limit_then_market | taker_market
+  makerEntryFillStyle: 'candle_live_proxy', // legacy field kept; GTX/limit entries now use candle-based live proxy
   // Per-engine execution lets D and E be tested with different live-style entries.
   // maker_gtx_then_taker = post-only/maker first; only if simulated GTX crossing-rejects, enter market.
   // maker_gtx_then_market = maker attempt first; if simulated GTX rejects OR passively misses/no-touches, enter market as a broad stress/rescue model.
-  engineEntryMode: { B: 'maker_gtx', C: 'maker_gtx', D: 'maker_gtx', E: 'maker_gtx', F: 'maker_gtx' },
+  engineEntryMode: { B: 'maker_gtx', C: 'maker_gtx', D: 'normal_limit_then_market', E: 'maker_gtx', F: 'maker_gtx' },
   marketEntrySlMultiplier: 1, // applies only to taker/market/fallback entries; 1 = off
-  engineMakerEntryFillStyle: { B: 'neutral_prob', C: 'neutral_prob', D: 'neutral_prob', E: 'neutral_prob', F: 'neutral_prob' },
+  engineMakerEntryFillStyle: { B: 'candle_live_proxy', C: 'candle_live_proxy', D: 'candle_live_proxy', E: 'candle_live_proxy', F: 'candle_live_proxy' },
   engineFillProbOverride: { B: null, C: null, D: null, E: null, F: null },
-  gtxRejectBufferPts: 0.01, // used by latency_open; one tick buffer for ETHUSDT
+  gtxRejectBufferPts: 0.01, // one tick buffer for candle-based entry classification
+  sameCandleRule: 'path_heuristic', // path_heuristic | sl_first | tp_first
   executionModel: 'B', // A | B | C | custom
   fillProbA: 1.0,
   fillProbB: 0.88,
@@ -91,6 +92,17 @@ function priceTouched(side, price, candle) { return isLong(side) ? candle.low <=
 function hitSL(side, sl, candle) { return isLong(side) ? candle.low <= sl : candle.high >= sl; }
 function hitTP(side, tp, candle) { return isLong(side) ? candle.high >= tp : candle.low <= tp; }
 
+function resolveSameCandleBoth(side, candle, cfg) {
+  const rule = cfg.sameCandleRule || 'path_heuristic';
+  if (rule === 'tp_first') return { first: 'TP', resolutionRuleUsed: 'same_candle_tp_first' };
+  if (rule === 'sl_first') return { first: 'SL', resolutionRuleUsed: 'same_candle_sl_first' };
+  const bullish = Number(candle.close) > Number(candle.open);
+  const bearish = Number(candle.close) < Number(candle.open);
+  if (bullish) return isLong(side) ? { first: 'SL', resolutionRuleUsed: 'same_candle_path_bull_low_first' } : { first: 'TP', resolutionRuleUsed: 'same_candle_path_bull_low_first' };
+  if (bearish) return isLong(side) ? { first: 'TP', resolutionRuleUsed: 'same_candle_path_bear_high_first' } : { first: 'SL', resolutionRuleUsed: 'same_candle_path_bear_high_first' };
+  return { first: 'SL', resolutionRuleUsed: 'same_candle_path_doji_conservative_sl' };
+}
+
 function makeRng(seed) {
   let s = Number(seed) || 1;
   s = (s >>> 0) || 1;
@@ -115,16 +127,21 @@ function normalizeConfig(config = {}) {
   if (config.slippageBasePts && !config.slippageManualPts) merged.slippageManualPts = { ...DEFAULT_CONFIG.slippageManualPts, ...config.slippageBasePts };
   if (config.slippageBasePts && !config.slippageDynamicBasePts) merged.slippageDynamicBasePts = { ...DEFAULT_CONFIG.slippageDynamicBasePts, ...config.slippageBasePts };
   if (config.tpMode === 'limit') merged.tpMode = 'maker_limit';
-  if (!['neutral_prob', 'touch_gated', 'hybrid', 'latency_open'].includes(merged.makerEntryFillStyle)) merged.makerEntryFillStyle = DEFAULT_CONFIG.makerEntryFillStyle;
-  const validEntryModes = ['maker_gtx', 'taker_market', 'maker_gtx_then_taker', 'maker_gtx_then_market', 'normal_limit', 'normal_limit_then_market'];
-  const validFillStyles = ['neutral_prob', 'touch_gated', 'hybrid', 'latency_open'];
+  const legacyEntryMap = { maker_gtx_then_taker: 'normal_limit_then_market', maker_gtx_then_market: 'normal_limit_then_market' };
+  if (legacyEntryMap[merged.entryMode]) merged.entryMode = legacyEntryMap[merged.entryMode];
+  if (['neutral_prob', 'touch_gated', 'hybrid', 'latency_open'].includes(merged.makerEntryFillStyle)) merged.makerEntryFillStyle = 'candle_live_proxy';
+  if (merged.makerEntryFillStyle !== 'candle_live_proxy') merged.makerEntryFillStyle = DEFAULT_CONFIG.makerEntryFillStyle;
+  const validEntryModes = ['maker_gtx', 'taker_market', 'normal_limit', 'normal_limit_then_market'];
+  const validFillStyles = ['candle_live_proxy'];
   for (const id of Object.keys(merged.engineEntryMode || {})) {
+    if (legacyEntryMap[merged.engineEntryMode[id]]) merged.engineEntryMode[id] = legacyEntryMap[merged.engineEntryMode[id]];
     if (!validEntryModes.includes(merged.engineEntryMode[id])) merged.engineEntryMode[id] = merged.entryMode;
   }
   for (const id of Object.keys(merged.engineMakerEntryFillStyle || {})) {
     if (!validFillStyles.includes(merged.engineMakerEntryFillStyle[id])) merged.engineMakerEntryFillStyle[id] = merged.makerEntryFillStyle;
   }
   merged.gtxRejectBufferPts = Math.max(0, Number(merged.gtxRejectBufferPts) || 0);
+  if (!['path_heuristic','sl_first','tp_first'].includes(merged.sameCandleRule)) merged.sameCandleRule = DEFAULT_CONFIG.sameCandleRule;
   merged.selectedLeverage = Math.max(1, Number(merged.selectedLeverage) || DEFAULT_CONFIG.selectedLeverage);
   merged.enforceEquityFloor = merged.enforceEquityFloor !== false;
   merged.enforceLeverageLimit = !!merged.enforceLeverageLimit;
@@ -249,13 +266,16 @@ function resolveTheoreticalOutcome(signal, candles, activeFromIdx, cfg) {
     if (!slHit && !tpHit) continue;
 
     let status = tpHit && !slHit ? 'TP' : slHit && !tpHit ? 'SL' : 'BOTH';
+    let sameCandleTpSl = false;
+    let resolutionRuleUsed = null;
     if (status === 'BOTH') {
-      const distToTP = Math.abs(c.open - signal.tp);
-      const distToSL = Math.abs(c.open - signal.sl);
-      status = distToTP <= distToSL ? 'TP' : 'SL';
+      sameCandleTpSl = true;
+      const resolved = resolveSameCandleBoth(signal.side, c, cfg);
+      status = resolved.first;
+      resolutionRuleUsed = resolved.resolutionRuleUsed;
     }
     const grossR = status === 'TP' ? Math.abs(signal.tp - signal.entry) / signal.slDistance : -1;
-    return { status, settleIdx: j, exitRefPrice: status === 'TP' ? signal.tp : signal.sl, expectedGrossR: fmtNum(grossR, 4) };
+    return { status, settleIdx: j, exitRefPrice: status === 'TP' ? signal.tp : signal.sl, expectedGrossR: fmtNum(grossR, 4), sameCandleTpSl, resolutionRuleUsed };
   }
 
   const last = candles[maxIdx] || candles[candles.length - 1];
@@ -313,6 +333,8 @@ function passOneBuildLedger(candles, cfg) {
       sig.theoreticalSettleIdx = i;
       sig.theoreticalExitRefPrice = outcome.exitRefPrice;
       sig.expectedGrossR = outcome.expectedGrossR;
+      sig.theoreticalSameCandleTpSl = !!outcome.sameCandleTpSl;
+      sig.theoreticalResolutionRuleUsed = outcome.resolutionRuleUsed || null;
       settledSignals.push(sig);
       engineStats[engineId].settled += 1;
       if (sig.expectedGrossR > 0) engineStats[engineId].signalWins += 1; else engineStats[engineId].signalLosses += 1;
@@ -430,321 +452,91 @@ function normalLimitDecision(signal, refPrice, cfg) {
   return { outcome: 'NORMAL_LIMIT_RESTING_MAKER', crosses: false, rests: true, direction: movedTowardTp > buffer ? 'toward_tp' : 'near_entry', movedPts: Math.abs(movedTowardTp) };
 }
 
+function entryMoveTowardTp(signal, price) {
+  return isLong(signal.side) ? price - signal.entry : signal.entry - price;
+}
+
+function entryCrossesAsTaker(signal, refPrice, cfg) {
+  const buffer = Number(cfg.gtxRejectBufferPts) || 0;
+  return entryMoveTowardTp(signal, refPrice) < -buffer;
+}
+
+function entryPassiveAway(signal, refPrice, cfg) {
+  const buffer = Number(cfg.gtxRejectBufferPts) || 0;
+  return entryMoveTowardTp(signal, refPrice) > buffer;
+}
+
+function makeEntryResult(base) {
+  return {
+    fillProb: 1,
+    makerEntryFillStyle: 'candle_live_proxy',
+    gtxDecisionModel: 'candle_live_proxy',
+    gtxRejectDirection: base.gtxRejectDirection ?? null,
+    gtxRejectMovedPts: base.gtxRejectMovedPts ?? 0,
+    gtxRejected: !!base.gtxRejected,
+    gtxPassiveMissTowardTP: !!base.gtxPassiveMissTowardTP,
+    takerFallbackUsed: !!base.takerFallbackUsed,
+    makerAttemptFailedBeforeFallback: !!base.makerAttemptFailedBeforeFallback,
+    ...base,
+  };
+}
+
 function tryFillEntry(signal, candles, cfg, rand) {
   const start = Math.min(candles.length - 1, signal.activeFromIdx);
   const end = Math.min(candles.length - 1, start + cfg.makerEntryTimeoutCandles);
   const mode = engineEntryMode(signal, cfg);
-  const style = engineMakerFillStyle(signal, cfg);
-  const baseProb = style === 'latency_open' || mode === 'taker_market' ? 1 : baseEntryFillProbability(cfg, signal.engine);
   const activeCandle = candles[start] || candles[signal.signalIdx];
   const refPrice = marketReferencePrice(signal, activeCandle);
-  const marketFallbackAnyMiss = mode === 'maker_gtx_then_market';
-  const makeMarketFallback = (reason, idx = start, extra = {}) => {
+  const movedTowardTp = entryMoveTowardTp(signal, refPrice);
+  const movedPts = Math.abs(movedTowardTp);
+  const passiveAway = entryPassiveAway(signal, refPrice, cfg);
+  const crosses = entryCrossesAsTaker(signal, refPrice, cfg);
+
+  const marketFallback = (reason, idx = start, extra = {}) => {
     const fillIdx = Math.min(candles.length - 1, Math.max(0, idx));
     const c = candles[fillIdx] || activeCandle;
-    const base = extra.entryBasePrice ?? marketReferencePrice(signal, c);
-    return {
+    return makeEntryResult({
       filled: true,
       fillIdx,
-      fillProb: 1,
       touchedEntry: !!extra.touchedEntry,
       entryFillReason: reason,
-      makerEntryFillStyle: style,
-      actualEntryMode: extra.actualEntryMode || 'market_fallback_after_gtx_attempt',
-      entryBasePrice: base,
-      gtxDecisionModel: extra.gtxDecisionModel || style,
-      gtxOutcome: extra.gtxOutcome || null,
-      gtxRejectDirection: extra.gtxRejectDirection ?? null,
-      gtxRejectMovedPts: extra.gtxRejectMovedPts ?? 0,
-      gtxRejected: !!extra.gtxRejected,
-      gtxPassiveMissTowardTP: !!extra.gtxPassiveMissTowardTP,
+      actualEntryMode: extra.actualEntryMode || 'market_fallback_after_limit_attempt',
+      entryBasePrice: extra.entryBasePrice ?? marketReferencePrice(signal, c),
+      gtxOutcome: extra.gtxOutcome || reason,
       takerFallbackUsed: true,
       makerAttemptFailedBeforeFallback: true,
-    };
+      ...extra,
+    });
   };
 
   if (mode === 'taker_market') {
-    return {
-      filled: true,
-      fillIdx: start,
-      fillProb: 1,
-      touchedEntry: true,
-      entryFillReason: 'TAKER_MARKET',
-      makerEntryFillStyle: 'taker',
-      actualEntryMode: 'taker_market',
-      entryBasePrice: signal.entry,
-      gtxDecisionModel: 'none_taker_market',
-      gtxOutcome: null,
-      gtxRejectDirection: null,
-      gtxRejectMovedPts: 0,
-      gtxRejected: false,
-      gtxPassiveMissTowardTP: false,
-      takerFallbackUsed: false,
-    };
+    return makeEntryResult({ filled: true, fillIdx: start, touchedEntry: true, entryFillReason: 'TAKER_MARKET', actualEntryMode: 'taker_market', entryBasePrice: refPrice, gtxOutcome: 'TAKER_MARKET' });
   }
 
   if (mode === 'normal_limit' || mode === 'normal_limit_then_market') {
-    const dec = normalLimitDecision(signal, refPrice, cfg);
-    const common = {
-      fillProb: 1,
-      makerEntryFillStyle: 'normal_limit',
-      gtxDecisionModel: 'normal_limit_cross_or_rest',
-      gtxOutcome: dec.outcome,
-      gtxRejectDirection: dec.direction,
-      gtxRejectMovedPts: dec.movedPts,
-      gtxRejected: false,
-      gtxPassiveMissTowardTP: false,
-    };
-    if (dec.crosses) {
-      return {
-        ...common,
-        filled: true,
-        fillIdx: start,
-        touchedEntry: true,
-        entryFillReason: 'NORMAL_LIMIT_CROSSED_TAKER',
-        actualEntryMode: 'normal_limit_taker_cross',
-        entryBasePrice: refPrice,
-        takerFallbackUsed: false,
-      };
-    }
+    if (crosses) return makeEntryResult({ filled: true, fillIdx: start, touchedEntry: true, entryFillReason: 'NORMAL_LIMIT_CROSSED_TAKER', actualEntryMode: 'normal_limit_taker_cross', entryBasePrice: refPrice, gtxOutcome: 'NORMAL_LIMIT_CROSSED_TAKER', gtxRejectDirection: 'toward_sl', gtxRejectMovedPts: movedPts });
+    if (!passiveAway) return makeEntryResult({ filled: true, fillIdx: start, touchedEntry: true, entryFillReason: 'NORMAL_LIMIT_NEAR_ENTRY_MAKER_FILLED', actualEntryMode: 'normal_limit_maker', entryBasePrice: signal.entry, gtxOutcome: 'NORMAL_LIMIT_NEAR_ENTRY_MAKER_FILLED' });
     for (let i = start; i <= end; i++) {
       const c = candles[i];
       if (!c || !priceTouched(signal.side, signal.entry, c)) continue;
-      return {
-        ...common,
-        filled: true,
-        fillIdx: i,
-        touchedEntry: true,
-        entryFillReason: 'NORMAL_LIMIT_RESTING_MAKER_FILLED',
-        actualEntryMode: 'normal_limit_maker',
-        entryBasePrice: signal.entry,
-        takerFallbackUsed: false,
-        gtxOutcome: 'NORMAL_LIMIT_RESTING_MAKER_FILLED',
-      };
+      return makeEntryResult({ filled: true, fillIdx: i, touchedEntry: true, entryFillReason: 'NORMAL_LIMIT_RETURN_TOUCH_MAKER_FILLED', actualEntryMode: 'normal_limit_maker', entryBasePrice: signal.entry, gtxOutcome: 'NORMAL_LIMIT_RETURN_TOUCH_MAKER_FILLED' });
     }
-    if (mode === 'normal_limit_then_market') {
-      const fallbackIdx = end;
-      const fallbackCandle = candles[fallbackIdx] || activeCandle;
-      return makeMarketFallback('NORMAL_LIMIT_NO_FILL_MARKET_FALLBACK', fallbackIdx, {
-        ...common,
-        touchedEntry: false,
-        actualEntryMode: 'normal_limit_market_fallback',
-        entryBasePrice: marketReferencePrice(signal, fallbackCandle),
-        gtxOutcome: 'NORMAL_LIMIT_NO_FILL',
-      });
-    }
-    return {
-      ...common,
-      filled: false,
-      fillIdx: null,
-      touchedEntry: false,
-      entryFillReason: 'NORMAL_LIMIT_NO_FILL_CANCELLED',
-      actualEntryMode: 'normal_limit',
-      entryBasePrice: refPrice,
-      takerFallbackUsed: false,
-      gtxOutcome: 'NORMAL_LIMIT_NO_FILL',
-    };
+    if (mode === 'normal_limit_then_market') return marketFallback('NORMAL_LIMIT_NO_RETURN_MARKET_FALLBACK', end, { touchedEntry: false, actualEntryMode: 'normal_limit_market_fallback', entryBasePrice: marketReferencePrice(signal, candles[end] || activeCandle), gtxOutcome: 'NORMAL_LIMIT_PASSIVE_NO_RETURN', gtxPassiveMissTowardTP: true, gtxRejectDirection: 'toward_tp', gtxRejectMovedPts: movedPts });
+    return makeEntryResult({ filled: false, fillIdx: null, touchedEntry: false, entryFillReason: 'NORMAL_LIMIT_PASSIVE_NO_RETURN_CANCELLED', actualEntryMode: 'normal_limit', entryBasePrice: refPrice, gtxOutcome: 'NORMAL_LIMIT_PASSIVE_NO_RETURN', gtxPassiveMissTowardTP: true, gtxRejectDirection: 'toward_tp', gtxRejectMovedPts: movedPts });
   }
 
-  if (style === 'latency_open') {
-    const dec = gtxLatencyDecision(signal, refPrice, cfg);
-    const common = {
-      fillProb: 1,
-      makerEntryFillStyle: style,
-      gtxDecisionModel: 'latency_open_price_proxy_return_check',
-      gtxOutcome: dec.outcome,
-      gtxRejectDirection: dec.direction,
-      gtxRejectMovedPts: dec.movedPts,
-      gtxRejected: dec.rejected,
-      gtxPassiveMissTowardTP: dec.outcome === 'PASSIVE_MISS_TOWARD_TP',
-    };
-
-    if (dec.filledMaker) {
-      return {
-        ...common,
-        filled: true,
-        fillIdx: start,
-        touchedEntry: true,
-        entryFillReason: dec.outcome,
-        actualEntryMode: 'maker_gtx_latency_open',
-        entryBasePrice: signal.entry,
-        takerFallbackUsed: false,
-      };
+  if (mode === 'maker_gtx') {
+    if (crosses) return makeEntryResult({ filled: false, fillIdx: null, touchedEntry: false, entryFillReason: 'GTX_REJECTED_CROSSING', actualEntryMode: 'maker_gtx', entryBasePrice: refPrice, gtxOutcome: 'GTX_REJECTED_CROSSING', gtxRejected: true, gtxRejectDirection: 'toward_sl', gtxRejectMovedPts: movedPts });
+    if (!passiveAway) return makeEntryResult({ filled: true, fillIdx: start, touchedEntry: true, entryFillReason: 'GTX_NEAR_ENTRY_MAKER_FILLED', actualEntryMode: 'maker_gtx', entryBasePrice: signal.entry, gtxOutcome: 'GTX_NEAR_ENTRY_MAKER_FILLED' });
+    for (let i = start; i <= end; i++) {
+      const c = candles[i];
+      if (!c || !priceTouched(signal.side, signal.entry, c)) continue;
+      return makeEntryResult({ filled: true, fillIdx: i, touchedEntry: true, entryFillReason: 'GTX_PASSIVE_RETURN_TOUCH_MAKER_FILLED', actualEntryMode: 'maker_gtx', entryBasePrice: signal.entry, gtxOutcome: 'GTX_PASSIVE_RETURN_TOUCH_MAKER_FILLED' });
     }
-
-    if (dec.outcome === 'PASSIVE_MISS_TOWARD_TP') {
-      for (let i = start; i <= end; i++) {
-        const c = candles[i];
-        if (!c || !priceTouched(signal.side, signal.entry, c)) continue;
-        return {
-          ...common,
-          filled: true,
-          fillIdx: i,
-          touchedEntry: true,
-          entryFillReason: 'GTX_ACCEPTED_PASSIVE_RETURN_FILLED_MAKER',
-          actualEntryMode: 'maker_gtx_latency_open',
-          entryBasePrice: signal.entry,
-          takerFallbackUsed: false,
-          gtxOutcome: 'PASSIVE_RETURN_FILLED_MAKER',
-        };
-      }
-
-      if (marketFallbackAnyMiss) {
-        const fallbackIdx = end;
-        const fallbackCandle = candles[fallbackIdx] || activeCandle;
-        return makeMarketFallback('PASSIVE_MISS_NO_RETURN_MARKET_FALLBACK', fallbackIdx, {
-          ...common,
-          touchedEntry: false,
-          actualEntryMode: 'market_fallback_after_passive_no_return',
-          entryBasePrice: marketReferencePrice(signal, fallbackCandle),
-          gtxOutcome: 'PASSIVE_NO_RETURN',
-        });
-      }
-
-      return {
-        ...common,
-        filled: false,
-        fillIdx: null,
-        touchedEntry: false,
-        entryFillReason: 'PASSIVE_MISS_NO_RETURN',
-        actualEntryMode: 'maker_gtx_latency_open',
-        entryBasePrice: refPrice,
-        takerFallbackUsed: false,
-        gtxOutcome: 'PASSIVE_NO_RETURN',
-      };
-    }
-
-    if (dec.rejected && (mode === 'maker_gtx_then_taker' || mode === 'maker_gtx_then_market')) {
-      return makeMarketFallback('GTX_REJECTED_CROSSING_TOWARD_SL_TAKER_FALLBACK', start, {
-        ...common,
-        touchedEntry: false,
-        actualEntryMode: 'taker_fallback_after_gtx_reject',
-        entryBasePrice: refPrice,
-      });
-    }
-
-    return {
-      ...common,
-      filled: false,
-      fillIdx: null,
-      touchedEntry: false,
-      entryFillReason: dec.outcome,
-      actualEntryMode: 'maker_gtx_latency_open',
-      entryBasePrice: refPrice,
-      takerFallbackUsed: false,
-    };
+    return makeEntryResult({ filled: false, fillIdx: null, touchedEntry: false, entryFillReason: 'GTX_PASSIVE_NO_RETURN_MISSED', actualEntryMode: 'maker_gtx', entryBasePrice: refPrice, gtxOutcome: 'GTX_PASSIVE_NO_RETURN', gtxPassiveMissTowardTP: true, gtxRejectDirection: 'toward_tp', gtxRejectMovedPts: movedPts });
   }
 
-  // 70/95 default: neutral probabilistic GTX. This is intentionally assumption-based.
-  if (style === 'neutral_prob') {
-    const filled = rand() <= baseProb;
-    if (filled) return {
-      filled: true,
-      fillIdx: start,
-      fillProb: baseProb,
-      touchedEntry: true,
-      entryFillReason: 'MAKER_NEUTRAL_FILLED',
-      makerEntryFillStyle: style,
-      actualEntryMode: 'maker_gtx',
-      entryBasePrice: signal.entry,
-      gtxDecisionModel: 'neutral_probability',
-      gtxOutcome: 'PROB_FILLED',
-      gtxRejectDirection: null,
-      gtxRejectMovedPts: 0,
-      gtxRejected: false,
-      gtxPassiveMissTowardTP: false,
-      takerFallbackUsed: false,
-    };
-    if (marketFallbackAnyMiss) return makeMarketFallback('MAKER_NEUTRAL_MISSED_MARKET_FALLBACK', start, { touchedEntry: true, gtxDecisionModel: 'neutral_probability', gtxOutcome: 'PROB_MISSED', entryBasePrice: signal.entry });
-    return {
-      filled: false,
-      fillIdx: null,
-      fillProb: baseProb,
-      touchedEntry: true,
-      entryFillReason: 'MAKER_NEUTRAL_MISSED',
-      makerEntryFillStyle: style,
-      actualEntryMode: 'maker_gtx',
-      entryBasePrice: signal.entry,
-      gtxDecisionModel: 'neutral_probability',
-      gtxOutcome: 'PROB_MISSED',
-      gtxRejectDirection: null,
-      gtxRejectMovedPts: 0,
-      gtxRejected: false,
-      gtxPassiveMissTowardTP: false,
-      takerFallbackUsed: false,
-    };
-  }
-
-  if (style === 'hybrid') {
-    if (rand() <= baseProb) {
-      return {
-        filled: true,
-        fillIdx: start,
-        fillProb: baseProb,
-        touchedEntry: true,
-        entryFillReason: 'MAKER_HYBRID_IMMEDIATE_FILLED',
-        makerEntryFillStyle: style,
-        actualEntryMode: 'maker_gtx',
-        entryBasePrice: signal.entry,
-        gtxDecisionModel: 'hybrid_probability_then_touch',
-        gtxOutcome: 'IMMEDIATE_PROB_FILLED',
-        gtxRejectDirection: null,
-        gtxRejectMovedPts: 0,
-        gtxRejected: false,
-        gtxPassiveMissTowardTP: false,
-        takerFallbackUsed: false,
-      };
-    }
-  }
-
-  let touched = false;
-  let lastFillProb = baseProb;
-  for (let i = start; i <= end; i++) {
-    const c = candles[i];
-    if (!c || !priceTouched(signal.side, signal.entry, c)) continue;
-    touched = true;
-    lastFillProb = fillProbabilityForTouch(signal, c, cfg);
-    if (rand() <= lastFillProb) {
-      return {
-        filled: true,
-        fillIdx: i,
-        fillProb: lastFillProb,
-        touchedEntry: true,
-        entryFillReason: style === 'hybrid' ? 'MAKER_HYBRID_TOUCH_FILLED' : 'MAKER_TOUCH_FILLED',
-        makerEntryFillStyle: style,
-        actualEntryMode: 'maker_gtx',
-        entryBasePrice: signal.entry,
-        gtxDecisionModel: style === 'hybrid' ? 'hybrid_probability_then_touch' : 'touch_gated_probability',
-        gtxOutcome: 'TOUCH_PROB_FILLED',
-        gtxRejectDirection: null,
-        gtxRejectMovedPts: 0,
-        gtxRejected: false,
-        gtxPassiveMissTowardTP: false,
-        takerFallbackUsed: false,
-      };
-    }
-  }
-
-  const reason = touched ? 'MAKER_TOUCH_NOT_FILLED' : 'MAKER_NO_TOUCH';
-  const finalReason = style === 'hybrid' ? 'MAKER_HYBRID_' + reason : reason;
-  if (marketFallbackAnyMiss) return makeMarketFallback(finalReason + '_MARKET_FALLBACK', end, { touchedEntry: touched, gtxDecisionModel: style === 'hybrid' ? 'hybrid_probability_then_touch' : 'touch_gated_probability', gtxOutcome: finalReason });
-  return {
-    filled: false,
-    fillIdx: null,
-    fillProb: lastFillProb,
-    touchedEntry: touched,
-    entryFillReason: finalReason,
-    makerEntryFillStyle: style,
-    actualEntryMode: 'maker_gtx',
-    entryBasePrice: signal.entry,
-    gtxDecisionModel: style === 'hybrid' ? 'hybrid_probability_then_touch' : 'touch_gated_probability',
-    gtxOutcome: finalReason,
-    gtxRejectDirection: null,
-    gtxRejectMovedPts: 0,
-    gtxRejected: false,
-    gtxPassiveMissTowardTP: false,
-    takerFallbackUsed: false,
-  };
+  return makeEntryResult({ filled: false, fillIdx: null, touchedEntry: false, entryFillReason: 'UNKNOWN_ENTRY_MODE', actualEntryMode: mode, entryBasePrice: refPrice, gtxOutcome: 'UNKNOWN_ENTRY_MODE' });
 }
 
 function feeFor(notional, isMaker, cfg) {
@@ -771,27 +563,29 @@ function resolveExecutedExit(signal, candles, fillIdx, cfg, rand) {
     if (!slHit && !tpHit) continue;
 
     let first = tpHit && !slHit ? 'TP' : slHit && !tpHit ? 'SL' : 'BOTH';
-    if (first === 'BOTH') {
-      const distToTP = Math.abs(c.open - signal.tp);
-      const distToSL = Math.abs(c.open - signal.sl);
-      first = distToTP <= distToSL ? 'TP' : 'SL';
+    const sameCandleTpSl = first === 'BOTH';
+    let resolutionRuleUsed = null;
+    if (sameCandleTpSl) {
+      const resolved = resolveSameCandleBoth(signal.side, c, cfg);
+      first = resolved.first;
+      resolutionRuleUsed = resolved.resolutionRuleUsed;
     }
 
     if (first === 'SL') {
       const { price, slip } = exitPriceWithSlippage(signal, signal.sl, 'sl', cfg, c);
-      return { status: 'SL', exitIdx: j, exitPrice: price, exitRefPrice: signal.sl, exitMaker: false, tpSlip: 0, slSlip: slip, tpExitMode: 'sl_taker', tpMakerAttempts, tpMakerFails, tpFallbackUsed: false };
+      return { status: 'SL', exitIdx: j, exitPrice: price, exitRefPrice: signal.sl, exitMaker: false, tpSlip: 0, slSlip: slip, tpExitMode: 'sl_taker', tpMakerAttempts, tpMakerFails, tpFallbackUsed: false, sameCandleTpSl, resolutionRuleUsed };
     }
 
     if (first === 'TP') {
       if (cfg.tpMode === 'market') {
         const { price, slip } = exitPriceWithSlippage(signal, signal.tp, 'tp', cfg, c);
-        return { status: 'TP', exitIdx: j, exitPrice: price, exitRefPrice: signal.tp, exitMaker: false, tpSlip: slip, slSlip: 0, tpExitMode: 'tp_market_taker', tpMakerAttempts, tpMakerFails, tpFallbackUsed: false };
+        return { status: 'TP', exitIdx: j, exitPrice: price, exitRefPrice: signal.tp, exitMaker: false, tpSlip: slip, slSlip: 0, tpExitMode: 'tp_market_taker', tpMakerAttempts, tpMakerFails, tpFallbackUsed: false, sameCandleTpSl, resolutionRuleUsed };
       }
 
       tpMakerAttempts += 1;
       const makerFilled = rand() <= cfg.tpMakerFillProb;
       if (makerFilled) {
-        return { status: 'TP', exitIdx: j, exitPrice: signal.tp, exitRefPrice: signal.tp, exitMaker: true, tpSlip: 0, slSlip: 0, tpExitMode: 'tp_maker_limit', tpMakerAttempts, tpMakerFails, tpFallbackUsed: false };
+        return { status: 'TP', exitIdx: j, exitPrice: signal.tp, exitRefPrice: signal.tp, exitMaker: true, tpSlip: 0, slSlip: 0, tpExitMode: 'tp_maker_limit', tpMakerAttempts, tpMakerFails, tpFallbackUsed: false, sameCandleTpSl, resolutionRuleUsed };
       }
 
       tpMakerFails += 1;
@@ -799,19 +593,19 @@ function resolveExecutedExit(signal, candles, fillIdx, cfg, rand) {
         const fallbackIdx = Math.min(maxIdx, j + cfg.tpFallbackCandles);
         const fallbackCandle = candles[fallbackIdx] || c;
         const { price, slip } = exitPriceWithSlippage(signal, signal.tp, 'tp', cfg, fallbackCandle);
-        return { status: 'TP', exitIdx: fallbackIdx, exitPrice: price, exitRefPrice: signal.tp, exitMaker: false, tpSlip: slip, slSlip: 0, tpExitMode: 'tp_maker_failed_taker_fallback', tpMakerAttempts, tpMakerFails, tpFallbackUsed: true };
+        return { status: 'TP', exitIdx: fallbackIdx, exitPrice: price, exitRefPrice: signal.tp, exitMaker: false, tpSlip: slip, slSlip: 0, tpExitMode: 'tp_maker_failed_taker_fallback', tpMakerAttempts, tpMakerFails, tpFallbackUsed: true, sameCandleTpSl, resolutionRuleUsed };
       }
 
       // maker_limit mode: failed TP touch stays open. If the same candle also hit SL, respect that risk.
       if (slHit) {
         const { price, slip } = exitPriceWithSlippage(signal, signal.sl, 'sl', cfg, c);
-        return { status: 'SL', exitIdx: j, exitPrice: price, exitRefPrice: signal.sl, exitMaker: false, tpSlip: 0, slSlip: slip, tpExitMode: 'tp_maker_failed_then_sl_same_candle', tpMakerAttempts, tpMakerFails, tpFallbackUsed: false };
+        return { status: 'SL', exitIdx: j, exitPrice: price, exitRefPrice: signal.sl, exitMaker: false, tpSlip: 0, slSlip: slip, tpExitMode: 'tp_maker_failed_then_sl_same_candle', tpMakerAttempts, tpMakerFails, tpFallbackUsed: false, sameCandleTpSl, resolutionRuleUsed };
       }
     }
   }
 
   const last = candles[maxIdx] || candles[candles.length - 1];
-  return { status: 'TIMEOUT', exitIdx: maxIdx, exitPrice: last.close, exitRefPrice: last.close, exitMaker: false, tpSlip: 0, slSlip: 0, tpExitMode: 'timeout_taker_close', tpMakerAttempts, tpMakerFails, tpFallbackUsed: false };
+  return { status: 'TIMEOUT', exitIdx: maxIdx, exitPrice: last.close, exitRefPrice: last.close, exitMaker: false, tpSlip: 0, slSlip: 0, tpExitMode: 'timeout_taker_close', tpMakerAttempts, tpMakerFails, tpFallbackUsed: false, sameCandleTpSl: false, resolutionRuleUsed: null };
 }
 
 function passTwoExecution(signals, candles, cfg) {
@@ -940,6 +734,10 @@ function passTwoExecution(signals, candles, cfg) {
       tpMakerAttempts: exit.tpMakerAttempts,
       tpMakerFails: exit.tpMakerFails,
       tpFallbackUsed: exit.tpFallbackUsed,
+      sameCandleTpSl: !!exit.sameCandleTpSl,
+      resolutionRuleUsed: exit.resolutionRuleUsed || null,
+      theoreticalSameCandleTpSl: !!sig.theoreticalSameCandleTpSl,
+      theoreticalResolutionRuleUsed: sig.theoreticalResolutionRuleUsed || null,
       actualRiskDistance: fmtNum(actualRiskDistance, 4),
       sizingDistance: fmtNum(sizingDistance, 4),
       positionSizingBasis: cfg.positionSizingBasis,
@@ -1031,12 +829,16 @@ export function simulateScenario(candles, config) {
   const tpMakerCount = results.filter(t => t.status === 'TP' && t.exitFeeType === 'maker').length;
   const tpTakerCount = results.filter(t => t.status === 'TP' && t.exitFeeType === 'taker').length;
   const tpFallbackCount = results.filter(t => t.tpFallbackUsed).length;
+  const sameCandleTpSlCount = results.filter(t => t.sameCandleTpSl).length;
+  const sameCandleResolvedTP = results.filter(t => t.sameCandleTpSl && t.status === 'TP').length;
+  const sameCandleResolvedSL = results.filter(t => t.sameCandleTpSl && t.status === 'SL').length;
+  const theoreticalSameCandleTpSlCount = pass1.signals.filter(s => s.theoreticalSameCandleTpSl).length;
   const missedNoTouch = pass2.missed.filter(m => (m.missedReason || '').includes('NO_TOUCH')).length;
   const missedProb = pass2.missed.filter(m => (m.missedReason || '').includes('NOT_FILLED') || (m.missedReason || '').includes('NEUTRAL_MISSED')).length;
   const allEntryRecords = [...pass2.missed, ...results];
   const gtxPassiveMissTowardTP = allEntryRecords.filter(r => r.gtxPassiveMissTowardTP || r.gtxOutcome === 'PASSIVE_MISS_TOWARD_TP').length;
   const gtxRejectedTowardSL = allEntryRecords.filter(r => r.gtxRejected && r.gtxRejectDirection === 'toward_sl').length;
-  const gtxAcceptedNearEntry = allEntryRecords.filter(r => r.gtxOutcome === 'GTX_ACCEPTED_NEAR_ENTRY_FILLED_MAKER').length;
+  const gtxAcceptedNearEntry = allEntryRecords.filter(r => String(r.gtxOutcome || '').includes('NEAR_ENTRY_MAKER_FILLED')).length;
   const gtxRejectTowardTP = allEntryRecords.filter(r => r.gtxRejected && r.gtxRejectDirection === 'toward_tp').length; // should normally be zero under corrected latency/open logic
   const gtxRejectTakerFallbackEntries = results.filter(t => t.takerFallbackEntryUsed && String(t.actualEntryMode || '').includes('reject')).length;
   const makerAttemptMarketFallbackEntries = results.filter(t => t.makerAttemptFailedBeforeFallback).length;
@@ -1123,6 +925,11 @@ export function simulateScenario(candles, config) {
       tpMakerCount,
       tpTakerCount,
       tpFallbackCount,
+      sameCandleTpSlCount,
+      sameCandleResolvedTP,
+      sameCandleResolvedSL,
+      theoreticalSameCandleTpSlCount,
+      sameCandleRule: cfg.sameCandleRule,
       gtxRejectTowardTP,
       gtxPassiveMissTowardTP,
       gtxRejectedTowardSL,
