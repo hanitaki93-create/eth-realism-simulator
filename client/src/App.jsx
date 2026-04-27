@@ -195,7 +195,7 @@ export default function App() {
   return (
     <div style={{ maxWidth: 1700, margin: '0 auto', padding: 20 }}>
       <h1 style={{ marginBottom: 4 }}>ETH Binance Realism Simulator</h1>
-      <div style={{ color: 'var(--text3)', marginBottom: 16 }}>Two-pass version: pure signal ledger first, execution overlay second. Latency/open GTX is deterministic price-proxy logic and does not use the 88% probability model.</div>
+      <div style={{ color: 'var(--text3)', marginBottom: 16 }}>Two-pass version: pure signal ledger first, execution overlay second. Entry execution uses a simplified candle-based live proxy: GTX is maker-or-miss, normal limit can maker/taker fill, and limit-then-market adds fallback.</div>
       <ScenarioForm config={config} setConfig={setConfig} onRun={runScenario} loading={loading} />
       <div className="card" style={{ marginBottom: 16 }}>{status}</div>
 
@@ -203,8 +203,8 @@ export default function App() {
         <>
           <div className="card" style={{ marginBottom: 16 }}>
             <b>Run complete.</b> {result.summary.trades.toLocaleString()} filled trades across {result.yearsRun.join(', ')}.<br />Run ID: <code>{result.runMeta?.runId}</code><br />
-            Loaded candles: {result.loadedCandles.toLocaleString()} | Global entry: {result.actualConfig.entryMode} | D entry: {result.actualConfig.engineEntryMode?.D} / {result.actualConfig.engineMakerEntryFillStyle?.D} | E entry: {result.actualConfig.engineEntryMode?.E} / {result.actualConfig.engineMakerEntryFillStyle?.E} | TP mode: {result.actualConfig.tpMode} | Slippage: {result.actualConfig.slippageMode}<br />
-            TP RR: {fmt(result.actualConfig.tpRMultiple, 2)} | Equity floor: {result.actualConfig.enforceEquityFloor ? 'ON' : 'OFF'} | Leverage block: {result.actualConfig.enforceLeverageLimit ? 'ON' : 'OFF'} | Risk basis: {result.actualConfig.positionSizingBasis} | Market SL mult: {fmt(result.actualConfig.marketEntrySlMultiplier || 1, 2)}x | Max R used: {fmt(result.summary.maxRiskUsed, 2)} | Selected leverage: {fmt(result.actualConfig.selectedLeverage,0)}x | Seed: {result.actualConfig.randomSeed}
+            Loaded candles: {result.loadedCandles.toLocaleString()} | Global entry: {result.actualConfig.entryMode} | D entry: {result.actualConfig.engineEntryMode?.D} | E entry: {result.actualConfig.engineEntryMode?.E} | TP mode: {result.actualConfig.tpMode} | Slippage: {result.actualConfig.slippageMode}<br />
+            TP RR: {fmt(result.actualConfig.tpRMultiple, 2)} | Equity floor: {result.actualConfig.enforceEquityFloor ? 'ON' : 'OFF'} | Leverage block: {result.actualConfig.enforceLeverageLimit ? 'ON' : 'OFF'} | Risk basis: {result.actualConfig.positionSizingBasis} | Market SL mult: {fmt(result.actualConfig.marketEntrySlMultiplier || 1, 2)}x | Same-candle: {result.actualConfig.sameCandleRule || 'path_heuristic'} | Max R used: {fmt(result.summary.maxRiskUsed, 2)} | Selected leverage: {fmt(result.actualConfig.selectedLeverage,0)}x | Seed: {result.actualConfig.randomSeed}
           </div>
 
           <div style={{ display:'grid', gridTemplateColumns:'repeat(10, minmax(0,1fr))', gap:10, marginBottom:16 }}>
@@ -286,6 +286,10 @@ export default function App() {
               <div>TP maker exits: {result.summary.tpMakerCount}</div>
               <div>TP taker exits: {result.summary.tpTakerCount}</div>
               <div>TP fallback exits: {result.summary.tpFallbackCount}</div>
+              <div>Same-candle TP/SL executed: {result.summary.sameCandleTpSlCount || 0}</div>
+              <div>Same-candle resolved TP / SL: {(result.summary.sameCandleResolvedTP || 0)} / {(result.summary.sameCandleResolvedSL || 0)}</div>
+              <div>Theoretical same-candle TP/SL: {result.summary.theoreticalSameCandleTpSlCount || 0}</div>
+              <div>Same-candle rule: {result.summary.sameCandleRule}</div>
               <div>GTX passive misses toward TP: {result.summary.gtxPassiveMissTowardTP}</div>
               <div>GTX rejected/crossing toward SL: {result.summary.gtxRejectedTowardSL}</div>
               <div>GTX accepted near-entry maker fills: {result.summary.gtxAcceptedNearEntry}</div>
@@ -361,14 +365,14 @@ export default function App() {
               <thead>
                 <tr>
                   <th>Engine</th><th>Status</th><th>Side</th><th>Entry</th><th>Exit</th><th>Raw TP</th><th>Exec TP</th><th>Gross R</th><th>Fee R</th><th>Net R</th>
-                  <th>PnL USD</th><th>Entry fee</th><th>Exit fee</th><th>Fee types</th><th>Entry reason</th><th>TP exit</th><th>Risk</th><th>Bal before</th><th>Bal after</th><th>Sizing bal</th><th>Exec SL</th><th>SL mult</th><th>Entry slip</th><th>TP slip</th><th>SL slip</th><th>Entry notional</th>
+                  <th>PnL USD</th><th>Entry fee</th><th>Exit fee</th><th>Fee types</th><th>Entry reason</th><th>TP exit</th><th>Risk</th><th>Bal before</th><th>Bal after</th><th>Sizing bal</th><th>Exec SL</th><th>SL mult</th><th>Entry slip</th><th>TP slip</th><th>SL slip</th><th>Entry notional</th><th>Same candle</th><th>Resolution</th>
                 </tr>
               </thead>
               <tbody>
                 {[...(result.results || [])].slice(-80).reverse().map((r, idx) => (
                   <tr key={idx}>
                     <td>{r.engine}</td><td>{r.status}</td><td>{r.side}</td><td>{fmt(r.entry,2)}</td><td>{fmt(r.exit,2)}</td><td>{fmt(r.rawTp,2)}</td><td>{fmt(r.executionTp,2)}</td><td>{fmt(r.grossRBeforeFees,4)}</td><td>{fmt(r.feeR,4)}</td><td>{fmt(r.pnlR,4)}</td>
-                    <td>{fmt(r.pnlUsd,2)}</td><td>{fmt(r.entryFeeUsd,2)}</td><td>{fmt(r.exitFeeUsd,2)}</td><td>{r.entryFeeType}/{r.exitFeeType}</td><td>{r.entryFillReason}</td><td>{r.tpExitMode}</td><td>{fmt(r.riskUsd,2)}</td><td>{fmt(r.balanceBefore,2)}</td><td>{fmt(r.balanceAfter,2)}</td><td>{fmt(r.sizingBalanceBefore,2)}</td><td>{fmt(r.executionSl,2)}</td><td>{fmt(r.marketEntrySlMultiplier,3)}</td><td>{fmt(r.entrySlip,4)}</td><td>{fmt(r.tpSlip,4)}</td><td>{fmt(r.slSlip,4)}</td><td>{fmt(r.entryNotional,2)}</td>
+                    <td>{fmt(r.pnlUsd,2)}</td><td>{fmt(r.entryFeeUsd,2)}</td><td>{fmt(r.exitFeeUsd,2)}</td><td>{r.entryFeeType}/{r.exitFeeType}</td><td>{r.entryFillReason}</td><td>{r.tpExitMode}</td><td>{fmt(r.riskUsd,2)}</td><td>{fmt(r.balanceBefore,2)}</td><td>{fmt(r.balanceAfter,2)}</td><td>{fmt(r.sizingBalanceBefore,2)}</td><td>{fmt(r.executionSl,2)}</td><td>{fmt(r.marketEntrySlMultiplier,3)}</td><td>{fmt(r.entrySlip,4)}</td><td>{fmt(r.tpSlip,4)}</td><td>{fmt(r.slSlip,4)}</td><td>{fmt(r.entryNotional,2)}</td><td>{r.sameCandleTpSl ? 'yes' : 'no'}</td><td>{r.resolutionRuleUsed || ''}</td>
                   </tr>
                 ))}
               </tbody>
