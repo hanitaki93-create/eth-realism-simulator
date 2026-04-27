@@ -34,10 +34,11 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
   const engineMode = (id) => config.engineEntryMode?.[id] || entryMode;
   const engineStyle = (id) => config.engineMakerEntryFillStyle?.[id] || config.makerEntryFillStyle || 'neutral_prob';
   const engineIsMaker = (id) => engineMode(id) !== 'taker_market';
-  const engineUsesProbability = (id) => engineIsMaker(id) && engineStyle(id) !== 'latency_open';
-  const engineUsesLatency = (id) => engineIsMaker(id) && engineStyle(id) === 'latency_open';
-  const engineUsesTouchTimeout = (id) => engineIsMaker(id) && (engineStyle(id) === 'touch_gated' || engineStyle(id) === 'hybrid');
-  const makerEntryActive = activeEngineIds.some(engineIsMaker);
+  const engineUsesGtxStyle = (id) => ['maker_gtx','maker_gtx_then_taker','maker_gtx_then_market'].includes(engineMode(id));
+  const engineUsesProbability = (id) => engineUsesGtxStyle(id) && engineStyle(id) !== 'latency_open';
+  const engineUsesLatency = (id) => engineUsesGtxStyle(id) && engineStyle(id) === 'latency_open';
+  const engineUsesTouchTimeout = (id) => (engineUsesGtxStyle(id) && (engineStyle(id) === 'touch_gated' || engineStyle(id) === 'hybrid')) || engineMode(id).startsWith('normal_limit');
+  const makerEntryActive = activeEngineIds.some(engineUsesGtxStyle);
   const fillModelActive = activeEngineIds.some(engineUsesProbability);
   const gtxRejectBufferActive = activeEngineIds.some(engineUsesLatency);
   const entryTouchTimeoutActive = activeEngineIds.some(engineUsesTouchTimeout);
@@ -90,6 +91,15 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
           </select>
         </label>
 
+        <label>Market Entry SL Mult
+          <select style={inputStyle} value={String(config.marketEntrySlMultiplier ?? 1)} onChange={e=>set('marketEntrySlMultiplier', +e.target.value)}>
+            <option value="1">OFF / 1.00x</option>
+            <option value="1.1">1.10x</option>
+            <option value="1.25">1.25x</option>
+            <option value="1.5">1.50x</option>
+          </select>
+        </label>
+
         <label>Compounding
           <select style={inputStyle} value={config.compounding} onChange={e=>set('compounding', e.target.value)}>
             <option value="none">None</option>
@@ -121,6 +131,8 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
             <option value="maker_gtx">Maker GTX</option>
             <option value="maker_gtx_then_taker">GTX crossing reject → taker fallback</option>
             <option value="maker_gtx_then_market">GTX any failed attempt → market fallback</option>
+            <option value="normal_limit">Normal Limit Only</option>
+            <option value="normal_limit_then_market">Normal Limit then Market</option>
             <option value="taker_market">Taker Market</option>
           </select>
         </label>
@@ -160,13 +172,13 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
       <div className="card" style={{ marginTop:12, background:'rgba(255,255,255,0.03)' }}>
         <h3>D/E execution overrides</h3>
         <div style={{ color:'var(--text3)', fontSize:12, marginBottom:8 }}>
-          End-game testing panel: D can be taker/GTX/fallback while E stays GTX. The latency/open proxy uses candle movement around order placement, not a flat block percentage. It separates accepted-passive orders, return-touch maker fills, passive no-return misses, and crossing rejections. Latency/open ignores the 88% probability model. Maker fills are charged maker; only true fallback/market fills are charged taker.
+          End-game testing panel: D can be taker/GTX/normal-limit/fallback while E stays GTX or normal-limit. The latency/open proxy uses candle movement around order placement, not a flat block percentage. It separates accepted-passive orders, return-touch maker fills, passive no-return misses, and crossing rejections. Latency/open ignores the 88% probability model. Maker fills are charged maker; only true fallback/market fills are charged taker.
         </div>
         <div style={{ display:'grid', gridTemplateColumns:'repeat(6, minmax(0,1fr))', gap:12 }}>
           {perEngineIds.map(id => {
             const engMode = engineMode(id);
             const engStyle = engineStyle(id);
-            const engIsMakerActive = engineIsMaker(id);
+            const engIsMakerActive = engineUsesGtxStyle(id);
             const engProbActive = engineUsesProbability(id);
             return <React.Fragment key={id}>
               <label>{id} Entry Mode
@@ -174,6 +186,8 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
                   <option value="maker_gtx">Maker GTX</option>
                   <option value="maker_gtx_then_taker">GTX crossing reject → taker fallback</option>
                   <option value="maker_gtx_then_market">GTX any failed attempt → market fallback</option>
+                  <option value="normal_limit">Normal Limit Only</option>
+                  <option value="normal_limit_then_market">Normal Limit then Market</option>
                   <option value="taker_market">Taker Market</option>
                 </select>
               </label>
