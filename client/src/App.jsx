@@ -53,6 +53,7 @@ function modeSummary(config) {
     takerFeeBps: config.feeTakerBps,
     slippageMode: config.slippageMode,
     slippagePreset: config.slippagePreset,
+    marketEntrySlMultiplier: config.marketEntrySlMultiplier,
     randomSeed: config.randomSeed,
     engines: config.engines,
   };
@@ -203,7 +204,7 @@ export default function App() {
           <div className="card" style={{ marginBottom: 16 }}>
             <b>Run complete.</b> {result.summary.trades.toLocaleString()} filled trades across {result.yearsRun.join(', ')}.<br />Run ID: <code>{result.runMeta?.runId}</code><br />
             Loaded candles: {result.loadedCandles.toLocaleString()} | Global entry: {result.actualConfig.entryMode} | D entry: {result.actualConfig.engineEntryMode?.D} / {result.actualConfig.engineMakerEntryFillStyle?.D} | E entry: {result.actualConfig.engineEntryMode?.E} / {result.actualConfig.engineMakerEntryFillStyle?.E} | TP mode: {result.actualConfig.tpMode} | Slippage: {result.actualConfig.slippageMode}<br />
-            TP RR: {fmt(result.actualConfig.tpRMultiple, 2)} | Equity floor: {result.actualConfig.enforceEquityFloor ? 'ON' : 'OFF'} | Leverage block: {result.actualConfig.enforceLeverageLimit ? 'ON' : 'OFF'} | Risk basis: {result.actualConfig.positionSizingBasis} | Max R used: {fmt(result.summary.maxRiskUsed, 2)} | Selected leverage: {fmt(result.actualConfig.selectedLeverage,0)}x | Seed: {result.actualConfig.randomSeed}
+            TP RR: {fmt(result.actualConfig.tpRMultiple, 2)} | Equity floor: {result.actualConfig.enforceEquityFloor ? 'ON' : 'OFF'} | Leverage block: {result.actualConfig.enforceLeverageLimit ? 'ON' : 'OFF'} | Risk basis: {result.actualConfig.positionSizingBasis} | Market SL mult: {fmt(result.actualConfig.marketEntrySlMultiplier || 1, 2)}x | Max R used: {fmt(result.summary.maxRiskUsed, 2)} | Selected leverage: {fmt(result.actualConfig.selectedLeverage,0)}x | Seed: {result.actualConfig.randomSeed}
           </div>
 
           <div style={{ display:'grid', gridTemplateColumns:'repeat(10, minmax(0,1fr))', gap:10, marginBottom:16 }}>
@@ -244,6 +245,11 @@ export default function App() {
               <h3>Execution / fees audit</h3>
               <div>Start balance: {fmt(result.summary.startBalance, 2)}</div>
               <div>End balance: {fmt(result.summary.endBalance, 2)}</div>
+              <div>Sizing end balance: {fmt(result.summary.sizingEndBalance, 2)}</div>
+              <div>Total PnL USD: {fmt(result.summary.totalPnlUsd, 2)}</div>
+              <div>Balance delta: {fmt(result.summary.balanceDelta, 2)}</div>
+              <div>Balance reconciliation diff: {fmt(result.summary.balanceReconciliationDiff, 6)}</div>
+              <div>PnL rows reconciliation diff: {fmt(result.summary.pnlRowsReconciliationDiff, 6)}</div>
               <div>Fees deducted: {fmt(result.summary.totalFeeUsd, 2)}</div>
               <div>TP / SL / Timeout: {result.summary.wins} / {result.summary.losses} / {result.summary.timeouts}</div>
               <div>Net-positive trades: {result.summary.netPositiveTrades}</div>
@@ -272,6 +278,11 @@ export default function App() {
               <div>Avg SL slip: {fmt(result.summary.avgSLSlip, 4)} pts</div>
               <div>Maker entries: {result.summary.makerEntries}</div>
               <div>Taker entries: {result.summary.takerEntries}</div>
+              <div>Normal limit maker entries: {result.summary.normalLimitMakerEntries}</div>
+              <div>Normal limit taker entries: {result.summary.normalLimitTakerEntries}</div>
+              <div>Normal limit misses: {result.summary.normalLimitMisses}</div>
+              <div>Market-SL widened trades: {result.summary.marketSlWidenedTrades}</div>
+              <div>Avg market SL multiplier: {fmt(result.summary.avgMarketSlMultiplier, 4)}</div>
               <div>TP maker exits: {result.summary.tpMakerCount}</div>
               <div>TP taker exits: {result.summary.tpTakerCount}</div>
               <div>TP fallback exits: {result.summary.tpFallbackCount}</div>
@@ -350,14 +361,14 @@ export default function App() {
               <thead>
                 <tr>
                   <th>Engine</th><th>Status</th><th>Side</th><th>Entry</th><th>Exit</th><th>Raw TP</th><th>Exec TP</th><th>Gross R</th><th>Fee R</th><th>Net R</th>
-                  <th>PnL USD</th><th>Entry fee</th><th>Exit fee</th><th>Fee types</th><th>Entry reason</th><th>TP exit</th><th>Entry slip</th><th>TP slip</th><th>SL slip</th><th>Entry notional</th>
+                  <th>PnL USD</th><th>Entry fee</th><th>Exit fee</th><th>Fee types</th><th>Entry reason</th><th>TP exit</th><th>Risk</th><th>Bal before</th><th>Bal after</th><th>Sizing bal</th><th>Exec SL</th><th>SL mult</th><th>Entry slip</th><th>TP slip</th><th>SL slip</th><th>Entry notional</th>
                 </tr>
               </thead>
               <tbody>
                 {[...(result.results || [])].slice(-80).reverse().map((r, idx) => (
                   <tr key={idx}>
                     <td>{r.engine}</td><td>{r.status}</td><td>{r.side}</td><td>{fmt(r.entry,2)}</td><td>{fmt(r.exit,2)}</td><td>{fmt(r.rawTp,2)}</td><td>{fmt(r.executionTp,2)}</td><td>{fmt(r.grossRBeforeFees,4)}</td><td>{fmt(r.feeR,4)}</td><td>{fmt(r.pnlR,4)}</td>
-                    <td>{fmt(r.pnlUsd,2)}</td><td>{fmt(r.entryFeeUsd,2)}</td><td>{fmt(r.exitFeeUsd,2)}</td><td>{r.entryFeeType}/{r.exitFeeType}</td><td>{r.entryFillReason}</td><td>{r.tpExitMode}</td><td>{fmt(r.entrySlip,4)}</td><td>{fmt(r.tpSlip,4)}</td><td>{fmt(r.slSlip,4)}</td><td>{fmt(r.entryNotional,2)}</td>
+                    <td>{fmt(r.pnlUsd,2)}</td><td>{fmt(r.entryFeeUsd,2)}</td><td>{fmt(r.exitFeeUsd,2)}</td><td>{r.entryFeeType}/{r.exitFeeType}</td><td>{r.entryFillReason}</td><td>{r.tpExitMode}</td><td>{fmt(r.riskUsd,2)}</td><td>{fmt(r.balanceBefore,2)}</td><td>{fmt(r.balanceAfter,2)}</td><td>{fmt(r.sizingBalanceBefore,2)}</td><td>{fmt(r.executionSl,2)}</td><td>{fmt(r.marketEntrySlMultiplier,3)}</td><td>{fmt(r.entrySlip,4)}</td><td>{fmt(r.tpSlip,4)}</td><td>{fmt(r.slSlip,4)}</td><td>{fmt(r.entryNotional,2)}</td>
                   </tr>
                 ))}
               </tbody>
