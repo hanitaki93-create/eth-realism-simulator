@@ -129,13 +129,19 @@ export default function ScenarioForm({ config, setConfig, onRun, loading }) {
       <div className="card" style={{ marginTop:12, background:'rgba(255,255,255,0.03)' }}>
         <h3>D/E execution overrides</h3>
         <div style={{ color:'var(--text3)', fontSize:12, marginBottom:8 }}>
-          Clean entry model: GTX is maker-only and can reject/miss; normal limit can fill maker or taker; limit-then-market adds a bot fallback. Entry classification is candle-based, not fixed percentage-based.
+          Sane entry model: candles decide whether a maker fill was possible; Maker Candidate Fill % is the live-calibration haircut for queue/latency uncertainty. GTX is maker-or-miss; normal limit can maker/taker; limit-then-market adds fallback.
         </div>
         <div style={{ display:'grid', gridTemplateColumns:'repeat(4, minmax(0,1fr))', gap:12 }}>
           {perEngineIds.map(id => <label key={id}>{id} Entry Mode
             <select style={inputStyle} value={engineMode(id)} onChange={e=>setEngineExec('engineEntryMode', id, e.target.value)}>
               {ENTRY_OPTIONS.map(([v,l]) => <option key={v} value={v}>{l}</option>)}
             </select>
+          </label>)}
+          <label>Maker Candidate Fill %
+            <NumInput step="0.05" value={config.makerCandidateFillProb ?? 0.5} onChange={v=>set('makerCandidateFillProb', v)} />
+          </label>
+          {perEngineIds.map(id => <label key={`${id}-makerprob`}>{id} Maker Fill Override
+            <input style={inputStyle} type="number" step="0.05" placeholder="global" value={config.engineMakerCandidateFillProb?.[id] ?? ''} onChange={e=>setEngineExec('engineMakerCandidateFillProb', id, e.target.value === '' ? null : +e.target.value)} />
           </label>)}
         </div>
       </div>
