@@ -394,6 +394,12 @@ function baseEntryFillProbability(cfg, engineId = null) {
   return cfg.fillProbB;
 }
 
+function makerCandidateProbability(cfg, engineId = null) {
+  const perEngine = engineId ? cfg.engineMakerCandidateFillProb?.[engineId] : null;
+  if (perEngine !== null && perEngine !== undefined && perEngine !== '\) return clamp(Number(perEngine), 0, 1);
+  return clamp(Number(cfg.makerCandidateFillProb ?? DEFAULT_CONFIG.makerCandidateFillProb), 0, 1);
+}
+
 function fillProbabilityForTouch(signal, candle, cfg) {
   const base = baseEntryFillProbability(cfg, signal.engine);
   if (engineEntryMode(signal, cfg) === 'taker_market') return 1;
