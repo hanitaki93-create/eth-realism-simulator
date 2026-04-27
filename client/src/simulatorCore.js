@@ -396,7 +396,7 @@ function baseEntryFillProbability(cfg, engineId = null) {
 
 function makerCandidateProbability(cfg, engineId = null) {
   const perEngine = engineId ? cfg.engineMakerCandidateFillProb?.[engineId] : null;
-  if (perEngine !== null && perEngine !== undefined && perEngine !== '\) return clamp(Number(perEngine), 0, 1);
+  if (perEngine !== null && perEngine !== undefined && perEngine !== '') return clamp(Number(perEngine), 0, 1);
   return clamp(Number(cfg.makerCandidateFillProb ?? DEFAULT_CONFIG.makerCandidateFillProb), 0, 1);
 }
 
