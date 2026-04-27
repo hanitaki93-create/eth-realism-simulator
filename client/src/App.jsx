@@ -54,6 +54,8 @@ function modeSummary(config) {
     slippageMode: config.slippageMode,
     slippagePreset: config.slippagePreset,
     marketEntrySlMultiplier: config.marketEntrySlMultiplier,
+    makerCandidateFillProb: config.makerCandidateFillProb,
+    engineMakerCandidateFillProb: config.engineMakerCandidateFillProb,
     randomSeed: config.randomSeed,
     engines: config.engines,
   };
@@ -195,7 +197,7 @@ export default function App() {
   return (
     <div style={{ maxWidth: 1700, margin: '0 auto', padding: 20 }}>
       <h1 style={{ marginBottom: 4 }}>ETH Binance Realism Simulator</h1>
-      <div style={{ color: 'var(--text3)', marginBottom: 16 }}>Two-pass version: pure signal ledger first, execution overlay second. Entry execution uses a simplified candle-based live proxy: GTX is maker-or-miss, normal limit can maker/taker fill, and limit-then-market adds fallback.</div>
+      <div style={{ color: 'var(--text3)', marginBottom: 16 }}>Two-pass version: pure signal ledger first, execution overlay second. Entry execution uses candle eligibility plus a live-calibration maker-fill haircut. GTX is maker-or-miss; normal limit can maker/taker; limit-then-market adds fallback.</div>
       <ScenarioForm config={config} setConfig={setConfig} onRun={runScenario} loading={loading} />
       <div className="card" style={{ marginBottom: 16 }}>{status}</div>
 
@@ -204,7 +206,7 @@ export default function App() {
           <div className="card" style={{ marginBottom: 16 }}>
             <b>Run complete.</b> {result.summary.trades.toLocaleString()} filled trades across {result.yearsRun.join(', ')}.<br />Run ID: <code>{result.runMeta?.runId}</code><br />
             Loaded candles: {result.loadedCandles.toLocaleString()} | Global entry: {result.actualConfig.entryMode} | D entry: {result.actualConfig.engineEntryMode?.D} | E entry: {result.actualConfig.engineEntryMode?.E} | TP mode: {result.actualConfig.tpMode} | Slippage: {result.actualConfig.slippageMode}<br />
-            TP RR: {fmt(result.actualConfig.tpRMultiple, 2)} | Equity floor: {result.actualConfig.enforceEquityFloor ? 'ON' : 'OFF'} | Leverage block: {result.actualConfig.enforceLeverageLimit ? 'ON' : 'OFF'} | Risk basis: {result.actualConfig.positionSizingBasis} | Market SL mult: {fmt(result.actualConfig.marketEntrySlMultiplier || 1, 2)}x | Same-candle: {result.actualConfig.sameCandleRule || 'path_heuristic'} | Max R used: {fmt(result.summary.maxRiskUsed, 2)} | Selected leverage: {fmt(result.actualConfig.selectedLeverage,0)}x | Seed: {result.actualConfig.randomSeed}
+            TP RR: {fmt(result.actualConfig.tpRMultiple, 2)} | Equity floor: {result.actualConfig.enforceEquityFloor ? 'ON' : 'OFF'} | Leverage block: {result.actualConfig.enforceLeverageLimit ? 'ON' : 'OFF'} | Risk basis: {result.actualConfig.positionSizingBasis} | Market SL mult: {fmt(result.actualConfig.marketEntrySlMultiplier || 1, 2)}x | Same-candle: {result.actualConfig.sameCandleRule || 'path_heuristic'} | Max R used: {fmt(result.summary.maxRiskUsed, 2)} | Selected leverage: {fmt(result.actualConfig.selectedLeverage,0)}x | Maker candidate fill: {fmt((result.actualConfig.makerCandidateFillProb ?? 0.5)*100,0)}% | Seed: {result.actualConfig.randomSeed}
           </div>
 
           <div style={{ display:'grid', gridTemplateColumns:'repeat(10, minmax(0,1fr))', gap:10, marginBottom:16 }}>
@@ -281,6 +283,9 @@ export default function App() {
               <div>Normal limit maker entries: {result.summary.normalLimitMakerEntries}</div>
               <div>Normal limit taker entries: {result.summary.normalLimitTakerEntries}</div>
               <div>Normal limit misses: {result.summary.normalLimitMisses}</div>
+              <div>Maker candidates: {result.summary.makerCandidateCount}</div>
+              <div>Maker candidate failed: {result.summary.makerCandidateFailedCount}</div>
+              <div>Maker candidate fill rate: {fmt((result.summary.makerCandidateFillRate || 0)*100, 2)}%</div>
               <div>Market-SL widened trades: {result.summary.marketSlWidenedTrades}</div>
               <div>Avg market SL multiplier: {fmt(result.summary.avgMarketSlMultiplier, 4)}</div>
               <div>TP maker exits: {result.summary.tpMakerCount}</div>
