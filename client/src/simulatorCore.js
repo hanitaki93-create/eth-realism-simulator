@@ -29,12 +29,13 @@ export const DEFAULT_CONFIG = {
 
   // Signal/execution
   tpRMultiple: 2,
-  entryMode: 'maker_gtx', // global fallback: maker_gtx | taker_market | maker_gtx_then_taker | maker_gtx_then_market
+  entryMode: 'maker_gtx', // global fallback: maker_gtx | taker_market | maker_gtx_then_taker | maker_gtx_then_market | normal_limit | normal_limit_then_market
   makerEntryFillStyle: 'neutral_prob', // global fallback: neutral_prob | touch_gated | hybrid | latency_open
   // Per-engine execution lets D and E be tested with different live-style entries.
   // maker_gtx_then_taker = post-only/maker first; only if simulated GTX crossing-rejects, enter market.
   // maker_gtx_then_market = maker attempt first; if simulated GTX rejects OR passively misses/no-touches, enter market as a broad stress/rescue model.
   engineEntryMode: { B: 'maker_gtx', C: 'maker_gtx', D: 'maker_gtx', E: 'maker_gtx', F: 'maker_gtx' },
+  marketEntrySlMultiplier: 1, // applies only to taker/market/fallback entries; 1 = off
   engineMakerEntryFillStyle: { B: 'neutral_prob', C: 'neutral_prob', D: 'neutral_prob', E: 'neutral_prob', F: 'neutral_prob' },
   engineFillProbOverride: { B: null, C: null, D: null, E: null, F: null },
   gtxRejectBufferPts: 0.01, // used by latency_open; one tick buffer for ETHUSDT
@@ -115,7 +116,7 @@ function normalizeConfig(config = {}) {
   if (config.slippageBasePts && !config.slippageDynamicBasePts) merged.slippageDynamicBasePts = { ...DEFAULT_CONFIG.slippageDynamicBasePts, ...config.slippageBasePts };
   if (config.tpMode === 'limit') merged.tpMode = 'maker_limit';
   if (!['neutral_prob', 'touch_gated', 'hybrid', 'latency_open'].includes(merged.makerEntryFillStyle)) merged.makerEntryFillStyle = DEFAULT_CONFIG.makerEntryFillStyle;
-  const validEntryModes = ['maker_gtx', 'taker_market', 'maker_gtx_then_taker', 'maker_gtx_then_market'];
+  const validEntryModes = ['maker_gtx', 'taker_market', 'maker_gtx_then_taker', 'maker_gtx_then_market', 'normal_limit', 'normal_limit_then_market'];
   const validFillStyles = ['neutral_prob', 'touch_gated', 'hybrid', 'latency_open'];
   for (const id of Object.keys(merged.engineEntryMode || {})) {
     if (!validEntryModes.includes(merged.engineEntryMode[id])) merged.engineEntryMode[id] = merged.entryMode;
@@ -128,6 +129,7 @@ function normalizeConfig(config = {}) {
   merged.enforceEquityFloor = merged.enforceEquityFloor !== false;
   merged.enforceLeverageLimit = !!merged.enforceLeverageLimit;
   if (!['signal_entry','actual_entry'].includes(merged.positionSizingBasis)) merged.positionSizingBasis = DEFAULT_CONFIG.positionSizingBasis;
+  merged.marketEntrySlMultiplier = Math.max(1, Number(merged.marketEntrySlMultiplier) || 1);
   merged.leverageCheckLevels = Array.isArray(merged.leverageCheckLevels) && merged.leverageCheckLevels.length ? merged.leverageCheckLevels.map(v => Math.max(1, Number(v) || 1)) : DEFAULT_CONFIG.leverageCheckLevels;
 
   merged.tpRMultiple = Math.max(0.1, Number(merged.tpRMultiple) || DEFAULT_CONFIG.tpRMultiple);
@@ -174,28 +176,36 @@ function getRiskDollar(balance, cfg) {
   return Math.max(0, capped);
 }
 
-function applyCompounding(balanceState, trade, cfg, ts) {
+function applyTradeAccounting(balanceState, trade, cfg, ts) {
+  // Always apply realized PnL to real account balance.
+  // Compounding only controls the sizing balance used for future risk calculations.
+  const pnl = Number(trade.pnlUsd) || 0;
+  balanceState.realizedBalance += pnl;
+
   const d = new Date(ts);
   const bucket = cfg.compounding === 'daily' ? d.toISOString().slice(0,10)
     : cfg.compounding === 'monthly' ? monthKey(ts)
     : cfg.compounding === 'quarterly' ? quarterKey(ts)
     : null;
 
+  if (cfg.riskMode !== 'pct') return;
   if (cfg.compounding === 'none') return;
   if (cfg.compounding === 'per_trade') {
-    balanceState.balance += trade.pnlUsd;
+    balanceState.sizingBalance += pnl;
     return;
   }
   if (bucket && balanceState.pendingBucket !== bucket) {
-    if (balanceState.pendingPnl !== 0) balanceState.balance += balanceState.pendingPnl;
+    if (balanceState.pendingPnl !== 0) balanceState.sizingBalance += balanceState.pendingPnl;
     balanceState.pendingPnl = 0;
     balanceState.pendingBucket = bucket;
   }
-  balanceState.pendingPnl += trade.pnlUsd;
+  if (bucket) balanceState.pendingPnl += pnl;
 }
 
-function finalizeCompounding(balanceState) {
-  if (balanceState.pendingPnl) balanceState.balance += balanceState.pendingPnl;
+function finalizeTradeAccounting(balanceState, cfg) {
+  if (cfg.riskMode === 'pct' && cfg.compounding !== 'none' && cfg.compounding !== 'per_trade' && balanceState.pendingPnl) {
+    balanceState.sizingBalance += balanceState.pendingPnl;
+  }
   balanceState.pendingPnl = 0;
 }
 
@@ -409,6 +419,17 @@ function gtxLatencyDecision(signal, refPrice, cfg) {
   };
 }
 
+function normalLimitDecision(signal, refPrice, cfg) {
+  // Normal limit is not post-only. If the limit would cross at placement, it fills as taker.
+  // Otherwise it rests as maker and may fill on return/touch within timeout.
+  const movedTowardTp = isLong(signal.side) ? refPrice - signal.entry : signal.entry - refPrice;
+  const buffer = Number(cfg.gtxRejectBufferPts) || 0;
+  if (movedTowardTp < -buffer) {
+    return { outcome: 'NORMAL_LIMIT_CROSSED_TAKER', crosses: true, rests: false, direction: 'toward_sl', movedPts: Math.abs(movedTowardTp) };
+  }
+  return { outcome: 'NORMAL_LIMIT_RESTING_MAKER', crosses: false, rests: true, direction: movedTowardTp > buffer ? 'toward_tp' : 'near_entry', movedPts: Math.abs(movedTowardTp) };
+}
+
 function tryFillEntry(signal, candles, cfg, rand) {
   const start = Math.min(candles.length - 1, signal.activeFromIdx);
   const end = Math.min(candles.length - 1, start + cfg.makerEntryTimeoutCandles);
@@ -459,6 +480,69 @@ function tryFillEntry(signal, candles, cfg, rand) {
       gtxRejected: false,
       gtxPassiveMissTowardTP: false,
       takerFallbackUsed: false,
+    };
+  }
+
+  if (mode === 'normal_limit' || mode === 'normal_limit_then_market') {
+    const dec = normalLimitDecision(signal, refPrice, cfg);
+    const common = {
+      fillProb: 1,
+      makerEntryFillStyle: 'normal_limit',
+      gtxDecisionModel: 'normal_limit_cross_or_rest',
+      gtxOutcome: dec.outcome,
+      gtxRejectDirection: dec.direction,
+      gtxRejectMovedPts: dec.movedPts,
+      gtxRejected: false,
+      gtxPassiveMissTowardTP: false,
+    };
+    if (dec.crosses) {
+      return {
+        ...common,
+        filled: true,
+        fillIdx: start,
+        touchedEntry: true,
+        entryFillReason: 'NORMAL_LIMIT_CROSSED_TAKER',
+        actualEntryMode: 'normal_limit_taker_cross',
+        entryBasePrice: refPrice,
+        takerFallbackUsed: false,
+      };
+    }
+    for (let i = start; i <= end; i++) {
+      const c = candles[i];
+      if (!c || !priceTouched(signal.side, signal.entry, c)) continue;
+      return {
+        ...common,
+        filled: true,
+        fillIdx: i,
+        touchedEntry: true,
+        entryFillReason: 'NORMAL_LIMIT_RESTING_MAKER_FILLED',
+        actualEntryMode: 'normal_limit_maker',
+        entryBasePrice: signal.entry,
+        takerFallbackUsed: false,
+        gtxOutcome: 'NORMAL_LIMIT_RESTING_MAKER_FILLED',
+      };
+    }
+    if (mode === 'normal_limit_then_market') {
+      const fallbackIdx = end;
+      const fallbackCandle = candles[fallbackIdx] || activeCandle;
+      return makeMarketFallback('NORMAL_LIMIT_NO_FILL_MARKET_FALLBACK', fallbackIdx, {
+        ...common,
+        touchedEntry: false,
+        actualEntryMode: 'normal_limit_market_fallback',
+        entryBasePrice: marketReferencePrice(signal, fallbackCandle),
+        gtxOutcome: 'NORMAL_LIMIT_NO_FILL',
+      });
+    }
+    return {
+      ...common,
+      filled: false,
+      fillIdx: null,
+      touchedEntry: false,
+      entryFillReason: 'NORMAL_LIMIT_NO_FILL_CANCELLED',
+      actualEntryMode: 'normal_limit',
+      entryBasePrice: refPrice,
+      takerFallbackUsed: false,
+      gtxOutcome: 'NORMAL_LIMIT_NO_FILL',
     };
   }
 
@@ -731,7 +815,7 @@ function resolveExecutedExit(signal, candles, fillIdx, cfg, rand) {
 }
 
 function passTwoExecution(signals, candles, cfg) {
-  const balanceState = { balance: cfg.startingBalance, pendingPnl: 0, pendingBucket: null };
+  const balanceState = { realizedBalance: cfg.startingBalance, sizingBalance: cfg.startingBalance, pendingPnl: 0, pendingBucket: null };
   const executed = [];
   const missed = [];
   const rand = makeRng(cfg.randomSeed);
@@ -743,8 +827,10 @@ function passTwoExecution(signals, candles, cfg) {
       continue;
     }
 
-    const equityBefore = balanceState.balance;
-    const riskUsd = getRiskDollar(equityBefore, cfg);
+    const balanceBefore = balanceState.realizedBalance;
+    const sizingBalanceBefore = balanceState.sizingBalance;
+    const riskUsd = getRiskDollar(sizingBalanceBefore, cfg);
+    const equityBefore = balanceBefore;
     if (riskUsd <= 0) {
       missed.push({ ...sig, ...entryAttempt, missedReason: 'NO_RISK_CAPITAL' });
       continue;
@@ -765,7 +851,17 @@ function passTwoExecution(signals, candles, cfg) {
       entryPrice = isLong(sig.side) ? entryPrice + entrySlip : entryPrice - entrySlip;
     }
 
-    const actualRiskDistance = Math.abs(entryPrice - sig.sl);
+    const entryIsMarketLike = !entryMaker;
+    const marketEntrySlMultiplier = entryIsMarketLike ? Math.max(1, Number(cfg.marketEntrySlMultiplier) || 1) : 1;
+    const baseSlDistanceFromEntry = Math.abs(entryPrice - sig.sl);
+    const executionSl = marketEntrySlMultiplier > 1
+      ? (isLong(sig.side) ? entryPrice - (baseSlDistanceFromEntry * marketEntrySlMultiplier) : entryPrice + (baseSlDistanceFromEntry * marketEntrySlMultiplier))
+      : sig.sl;
+    const executionTp = marketEntrySlMultiplier > 1
+      ? (isLong(sig.side) ? entryPrice + (Math.abs(entryPrice - executionSl) * cfg.tpRMultiple) : entryPrice - (Math.abs(entryPrice - executionSl) * cfg.tpRMultiple))
+      : sig.tp;
+    const execSignal = marketEntrySlMultiplier > 1 ? { ...sig, sl: executionSl, tp: executionTp, executionTp } : sig;
+    const actualRiskDistance = Math.abs(entryPrice - executionSl);
     const sizingDistance = cfg.positionSizingBasis === 'actual_entry' ? Math.max(actualRiskDistance, 0.0001) : sig.slDistance;
     const qty = riskUsd / sizingDistance;
     const entryNotional = Math.abs(entryPrice * qty);
@@ -777,8 +873,8 @@ function passTwoExecution(signals, candles, cfg) {
       continue;
     }
 
-    const exit = resolveExecutedExit(sig, candles, entryAttempt.fillIdx, cfg, rand);
-    const grossPnl = isLong(sig.side) ? (exit.exitPrice - entryPrice) * qty : (entryPrice - exit.exitPrice) * qty;
+    const exit = resolveExecutedExit(execSignal, candles, entryAttempt.fillIdx, cfg, rand);
+    const grossPnl = isLong(execSignal.side) ? (exit.exitPrice - entryPrice) * qty : (entryPrice - exit.exitPrice) * qty;
     const exitNotional = Math.abs(exit.exitPrice * qty);
     const entryFeeUsd = feeFor(entryNotional, entryMaker, cfg);
     const exitFeeUsd = feeFor(exitNotional, exit.exitMaker, cfg);
@@ -794,6 +890,8 @@ function passTwoExecution(signals, candles, cfg) {
       fillIdx: entryAttempt.fillIdx,
       settleIdx: exit.exitIdx,
       equityBefore: fmtNum(equityBefore, 2),
+      balanceBefore: fmtNum(balanceBefore, 2),
+      sizingBalanceBefore: fmtNum(sizingBalanceBefore, 2),
       riskUsd: fmtNum(riskUsd, 2),
       qty: fmtNum(qty, 6),
       signalEntry: fmtNum(sig.entry, 4),
@@ -801,6 +899,9 @@ function passTwoExecution(signals, candles, cfg) {
       entry: fmtNum(entryPrice, 4),
       exit: fmtNum(exit.exitPrice, 4),
       exitRefPrice: fmtNum(exit.exitRefPrice, 4),
+      executionSl: fmtNum(executionSl, 4),
+      executionTp: fmtNum(executionTp, 4),
+      marketEntrySlMultiplier: fmtNum(marketEntrySlMultiplier, 3),
       grossPnl: fmtNum(grossPnl, 2),
       pnlUsd: fmtNum(pnlUsd, 2),
       grossRBeforeFees: fmtNum(grossRBeforeFees, 4),
@@ -845,12 +946,14 @@ function passTwoExecution(signals, candles, cfg) {
       slippageModeUsed: cfg.slippageMode,
     };
 
+    applyTradeAccounting(balanceState, trade, cfg, candles[trade.settleIdx]?.closeTime || sig.signalTime);
+    trade.balanceAfter = fmtNum(balanceState.realizedBalance, 2);
+    trade.sizingBalanceAfter = fmtNum(balanceState.sizingBalance, 2);
     executed.push(trade);
-    applyCompounding(balanceState, trade, cfg, candles[trade.settleIdx]?.closeTime || sig.signalTime);
   }
 
-  finalizeCompounding(balanceState);
-  return { executed, missed, endBalance: fmtNum(balanceState.balance, 2) };
+  finalizeTradeAccounting(balanceState, cfg);
+  return { executed, missed, endBalance: fmtNum(balanceState.realizedBalance, 2), sizingEndBalance: fmtNum(balanceState.sizingBalance, 2) };
 }
 
 function summarizeByEngine(cfg, pass1, pass2) {
@@ -916,6 +1019,10 @@ export function simulateScenario(candles, config) {
   const grossR = results.reduce((a, t) => a + t.grossRBeforeFees, 0);
   const feeR = results.reduce((a, t) => a + t.feeR, 0);
   const totalTurnover = results.reduce((a, t) => a + t.totalTurnover, 0);
+  const totalPnlUsd = results.reduce((a, t) => a + (Number(t.pnlUsd) || 0), 0);
+  const balanceDelta = (Number(pass2.endBalance) || 0) - (Number(startBalance) || 0);
+  const pnlRowsReconciliationDiff = totalPnlUsd - results.reduce((a, t) => a + ((Number(t.pnlR) || 0) * (Number(t.riskUsd) || 0)), 0);
+  const balanceReconciliationDiff = balanceDelta - totalPnlUsd;
 
   const signalWinRate = pass1.signals.length ? pass1.signals.filter(s => s.expectedGrossR > 0).length / pass1.signals.length : 0;
   const filledWinRate = results.length ? results.filter(t => t.grossRBeforeFees > 0).length / results.length : 0;
@@ -979,6 +1086,11 @@ export function simulateScenario(candles, config) {
       avgR: fmtNum(results.length ? netR / results.length : 0, 4),
       startBalance: fmtNum(startBalance, 2),
       endBalance: pass2.endBalance,
+      sizingEndBalance: pass2.sizingEndBalance,
+      totalPnlUsd: fmtNum(totalPnlUsd, 2),
+      balanceDelta: fmtNum(balanceDelta, 2),
+      balanceReconciliationDiff: fmtNum(balanceReconciliationDiff, 6),
+      pnlRowsReconciliationDiff: fmtNum(pnlRowsReconciliationDiff, 6),
       totalFeeUsd: fmtNum(totalFeeUsd, 2),
       totalTurnover: fmtNum(totalTurnover, 2),
       feeTurnoverPct: totalTurnover > 0 ? fmtNum((totalFeeUsd / totalTurnover) * 100, 4) : 0,
@@ -1001,6 +1113,11 @@ export function simulateScenario(candles, config) {
       avgSLSlip: fmtNum(avg(results.map(t => t.slSlip || 0)), 4),
       avgTPSlip: fmtNum(avg(results.map(t => t.tpSlip || 0)), 4),
       maxRiskUsed: fmtNum(maxRiskUsed, 2),
+      normalLimitMakerEntries: results.filter(t => t.actualEntryMode === 'normal_limit_maker').length,
+      normalLimitTakerEntries: results.filter(t => t.actualEntryMode === 'normal_limit_taker_cross').length,
+      normalLimitMisses: pass2.missed.filter(m => String(m.actualEntryMode || '').includes('normal_limit')).length,
+      marketSlWidenedTrades: results.filter(t => Number(t.marketEntrySlMultiplier || 1) > 1).length,
+      avgMarketSlMultiplier: fmtNum(avg(results.filter(t => Number(t.marketEntrySlMultiplier || 1) > 1).map(t => Number(t.marketEntrySlMultiplier || 1))), 4),
       makerEntries: results.filter(t => t.entryFeeType === 'maker').length,
       takerEntries: results.filter(t => t.entryFeeType === 'taker').length,
       tpMakerCount,
